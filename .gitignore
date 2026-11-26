@@ -1,0 +1,13 @@
+# Local credentials written by scripts/bootstrap.py
+flagsmith.env
+.env
+
+# Referee's own records for this checkout (plans, decisions, ledger)
+.referee/
+
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.DS_Store

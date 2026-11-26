@@ -1,0 +1,21 @@
+{
+  "name": "Signup form length",
+  "hypothesis": "A three-field signup form gets more completed signups than the six-field form, because every extra field is a reason to leave.",
+  "flag": "signup_form",
+  "control": {"value": "six_fields", "description": "The current form: name, email, password, college, phone, GitHub"},
+  "variants": [
+    {"key": "three_fields", "value": "three_fields", "share": 50, "description": "Only name, email and password"}
+  ],
+  "rollout_percentage": 100,
+  "metrics": [
+    {"name": "Signup completed", "event": "signup_completed", "goal": "increase", "aggregation": "occurrence"},
+    {"name": "Signup error shown", "event": "signup_error", "goal": "not_increase", "aggregation": "occurrence"}
+  ],
+  "assumptions": {
+    "baseline_rate": 0.22,
+    "minimum_lift": 0.25,
+    "daily_identities": 1500,
+    "power": 0.8,
+    "deadline": null
+  }
+}

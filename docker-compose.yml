@@ -1,0 +1,111 @@
+# Everything Referee's demo needs, on one machine:
+#
+#   flagsmith + task processor + postgres   open-source Flagsmith with Experimentation
+#   app        (profile "demo")              the Hack Night signup page, using the Flagsmith Python SDK
+#   referee    (profile "demo")              Referee's dashboard, where a person approves rollouts
+#
+# Start it with ./demo/up.sh, which also creates the local admin, project and keys.
+#
+# The Flagsmith services follow the official compose file
+# (https://github.com/Flagsmith/flagsmith/blob/main/docker-compose.yml) with the
+# image pinned so the demo keeps working as Flagsmith moves on.
+
+name: referee
+
+x-flagsmith-image: &flagsmith-image docker.flagsmith.com/flagsmith/flagsmith:${FLAGSMITH_VERSION:-2.295.2}
+
+x-flagsmith-env: &flagsmith-env
+  DATABASE_URL: postgresql://postgres:password@postgres:5432/flagsmith
+  USE_POSTGRES_FOR_ANALYTICS: 'true'
+  ENVIRONMENT: production
+  DJANGO_ALLOWED_HOSTS: '*'
+  FLAGSMITH_DOMAIN: localhost:${FLAGSMITH_PORT:-8000}
+  DJANGO_SECRET_KEY: local-development-only
+  WAREHOUSE_CREDENTIALS_SECRET: local-development-only
+  TASK_RUN_METHOD: TASK_PROCESSOR
+  # Stores SDK events in the Postgres above so experiments work with no
+  # separate warehouse. Fine for trying things out; use a real warehouse in production.
+  EXPERIMENTATION_ENABLED: 'true'
+
+volumes:
+  pgdata:
+
+services:
+  postgres:
+    image: postgres:15.5-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: flagsmith
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -d flagsmith -U postgres']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 20s
+
+  migrate-db:
+    image: *flagsmith-image
+    command: [migrate]
+    environment:
+      <<: *flagsmith-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  flagsmith:
+    image: *flagsmith-image
+    restart: unless-stopped
+    command: [serve]
+    environment:
+      <<: *flagsmith-env
+    ports:
+      - '${FLAGSMITH_PORT:-8000}:8000'
+    depends_on:
+      migrate-db:
+        condition: service_completed_successfully
+
+  flagsmith-task-processor:
+    image: *flagsmith-image
+    restart: unless-stopped
+    command: [run-task-processor]
+    environment:
+      <<: *flagsmith-env
+    depends_on:
+      migrate-db:
+        condition: service_completed_successfully
+
+  app:
+    profiles: [demo]
+    build: ./demo/app
+    restart: unless-stopped
+    env_file: flagsmith.env
+    environment:
+      # Inside the compose network Flagsmith is reached by service name.
+      FLAGSMITH_API_URL: http://flagsmith:8000/api/v1
+    ports:
+      - '${APP_PORT:-8080}:8080'
+    depends_on:
+      - flagsmith
+
+  referee:
+    profiles: [demo]
+    build: .
+    restart: unless-stopped
+    # Run as the host user so files in ./.referee stay owned by you.
+    user: '${REFEREE_UID:-1000}:${REFEREE_GID:-1000}'
+    env_file: flagsmith.env
+    environment:
+      FLAGSMITH_API_URL: http://flagsmith:8000/api/v1
+      REFEREE_STATE_DIR: /work/.referee
+    command: [serve, --host, 0.0.0.0, --port, '8787']
+    volumes:
+      # The same .referee folder the CLI and MCP server on the host use, so a
+      # proposal made by an agent shows up here for approval.
+      - ./.referee:/work/.referee
+    ports:
+      - '127.0.0.1:${REFEREE_PORT:-8787}:8787'
+    depends_on:
+      - flagsmith

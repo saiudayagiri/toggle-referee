@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flagsmith-referee"
+version = "0.1.0"
+description = "Plan, check, watch and call Flagsmith experiments from a coding agent or the terminal. A person approves every rollout."
+readme = "README.md"
+requires-python = ">=3.9"
+keywords = ["flagsmith", "feature-flags", "experimentation", "ab-testing", "mcp"]
+dependencies = []
+
+[project.scripts]
+referee = "referee.cli:main"
+
+[tool.setuptools]
+packages = ["referee"]

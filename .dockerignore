@@ -1,0 +1,7 @@
+.git
+.referee
+flagsmith.env
+.env
+**/__pycache__
+tests
+docs
