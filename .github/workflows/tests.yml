@@ -9,11 +9,11 @@ jobs:
       fail-fast: false
       matrix:
         python: ['3.9', '3.11', '3.13']
+    # Official Python images, so the oldest supported version stays testable
+    # whatever the runner image ships.
+    container: python:${{ matrix.python }}-slim
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
       # Referee has no dependencies, so there is nothing to install.
-      - run: python -m unittest discover -s tests -t .
+      - run: python -W error -m unittest discover -s tests -t .
       - run: python -m referee plan demo/plan.json
