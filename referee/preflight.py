@@ -185,18 +185,40 @@ def run(
     if code_root is not None:
         values = [variant_value(o) for o in live] + [o["key"] for o in live if o.get("key")]
         scan = codescan.scan(Path(code_root), flag, values)
-        if not scan.references:
+        reads = [r for r in scan.references if r.kind in ("exposing", "plain_read")]
+        if not scan.references and scan.unnamed_reads:
+            first = scan.unnamed_reads[0]
+            add(
+                "code_exposure", "warn", "Could not confirm the code reads this flag",
+                "The flag's name does not appear in the code, but %d experiment call(s) read a flag whose name "
+                "is a variable (first at %s:%d), which this text scan cannot follow. Check that one of them "
+                "reads '%s'." % (len(scan.unnamed_reads), first.file, first.line, flag),
+            )
+        elif not scan.references:
             add(
                 "code_flag", "fail", "The code never mentions the flag",
                 "No string literal '%s' in %d source files under %s." % (flag, scan.files_scanned, code_root),
                 "Evaluate the flag with the SDK's experiment call, for example get_experiment_flag(\"%s\", identifier=...)." % flag,
             )
+        elif not scan.exposing and not reads and scan.unnamed_reads:
+            first = scan.unnamed_reads[0]
+            add(
+                "code_exposure", "warn", "Could not confirm the flag is read through an experiment call",
+                "The code mentions '%s' but this text scan cannot see it being passed to a call. %d experiment "
+                "call(s) read a flag whose name is a variable (first at %s:%d); check that one of them reads this flag."
+                % (flag, len(scan.unnamed_reads), first.file, first.line),
+                "Passing the name as a literal or a simple constant lets preflight verify it.",
+                [r.to_dict() for r in scan.references[:5]],
+            )
         elif not scan.exposing:
             add(
-                "code_exposure", "fail", "The flag is read without recording an exposure",
-                "The code reads '%s' but never through a call that records who saw which version, "
-                "so Flagsmith would show zero identities." % flag,
-                "Use get_experiment_flag / getExperimentFlag / useExperiment (or call track_exposure_event after evaluating).",
+                "code_exposure", "fail", "No experiment call reads this flag",
+                "The code %s '%s', but this scan found no call that records who saw which version "
+                "(get_experiment_flag / getExperimentFlag / useExperiment). If the flag is only read with a "
+                "plain call, Flagsmith would show zero identities."
+                % ("reads" if reads else "mentions", flag),
+                "Read the flag through the experiment call, with its name as a literal or a simple constant "
+                "(preflight is a text scan and cannot follow a name built at run time).",
                 [r.to_dict() for r in scan.references[:5]],
             )
         else:
@@ -256,9 +278,10 @@ def run(
                 else:
                     add(
                         "code_event:" + event, "fail", "The code never sends '%s'" % event,
-                        "Metric '%s' counts this event, but no track_event / trackEvent call with that name was found."
-                        % metric_name,
-                        "Call track_event(\"%s\", identifier=...) where the success happens." % event,
+                        "Metric '%s' counts this event, but no track_event / trackEvent call with that name was found. "
+                        "(Preflight is a text scan: it sees the name as a literal or a simple constant in the call, "
+                        "not one passed through a wrapper with another name.)" % metric_name,
+                        "Call track_event(\"%s\", identifier=...) at the point in the code where it happens." % event,
                     )
         if scan.leaked_keys:
             add(
@@ -271,7 +294,11 @@ def run(
     # ----------------------------------------------------- events received
     for event, metric_name in events_needed.items():
         if event in seen_events:
-            add("event_seen:" + event, "pass", "Flagsmith has received '%s' events" % event, "")
+            add(
+                "event_seen:" + event, "info", "Flagsmith has received '%s' events before" % event,
+                "At some point, from some client: this does not show that the code scanned here is sending them. "
+                "After the start, the scorecard is what confirms events are arriving.",
+            )
             continue
         # Events that some metric in this environment counts are somebody
         # else's; only unclaimed names can be this one misspelt.

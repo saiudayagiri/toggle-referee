@@ -51,8 +51,9 @@ th{font-size:12px;color:var(--muted);font-weight:600}td.num,th.num{text-align:ri
 .ci{position:relative;height:14px;min-width:160px}.ci .axis{position:absolute;left:0;right:0;top:6px;height:2px;background:var(--bar)}
 .ci .zero{position:absolute;top:0;bottom:0;width:1px;background:var(--muted)}.ci .range{position:absolute;top:4px;height:6px;border-radius:3px;background:var(--accent);opacity:.55}
 .ci .dot{position:absolute;top:2px;width:10px;height:10px;margin-left:-5px;border-radius:50%;background:var(--accent)}
-.state-winning{color:var(--good);font-weight:600}.state-losing{color:var(--bad);font-weight:600}
-form.approve{display:grid;gap:8px;max-width:420px;margin-top:10px}
+.state-winning,.state-held{color:var(--good);font-weight:600}.state-losing,.state-worse{color:var(--bad);font-weight:600}.state-leans{color:var(--warn);font-weight:600}
+form.approve{display:grid;gap:8px;align-content:start}
+.choices{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:24px;margin-top:12px}
 label{font-size:13px;color:var(--muted)}input[type=text],input[type=email],input[type=password]{width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:inherit}
 button{padding:9px 14px;border-radius:6px;border:1px solid var(--accent);background:var(--accent);color:var(--panel);font:inherit;font-weight:600;cursor:pointer}
 button.secondary{background:transparent;color:var(--ink);border-color:var(--line)}
@@ -128,13 +129,19 @@ def scorecard_html(card: Dict[str, Any]) -> str:
 
     progress = card["progress"]
     if progress.get("needed_per_arm"):
+        reached = progress["smallest_arm"] >= progress["needed_per_arm"]
         parts.append(
             '<h2>Progress</h2><div class="bar"><i style="width:%.0f%%"></i></div>'
-            '<p class="small muted">%d of %d identities in the smallest version (%s)%s</p>'
+            '<p class="small muted">%s</p>'
             % (
-                (progress["fraction"] or 0) * 100, progress["smallest_arm"], progress["needed_per_arm"],
-                pct(progress["fraction"], 0),
-                ", about %s to go" % esc(_duration(progress["eta_hours"])) if progress.get("eta_hours") else "",
+                (progress["fraction"] or 0) * 100,
+                "Planned sample reached: %d identities in the smallest version (planned %d)"
+                % (progress["smallest_arm"], progress["needed_per_arm"])
+                if reached
+                else "%d of %d identities in the smallest version (%s)%s" % (
+                    progress["smallest_arm"], progress["needed_per_arm"], pct(progress["fraction"], 0),
+                    ", about %s to go" % esc(_duration(progress["eta_hours"])) if progress.get("eta_hours") else "",
+                ),
             )
         )
 
@@ -177,7 +184,7 @@ def scorecard_html(card: Dict[str, Any]) -> str:
                     "<tr><td>%s</td><td class=num>%s</td><td class=num>%s</td><td>%s</td><td class=num>%s</td><td class=\"state-%s\">%s</td></tr>"
                     % (
                         esc(arm["key"]), shown, signed((inference or {}).get("lift")), _interval(inference, scale),
-                        esc(report._chance(numbers).replace("-", "–") if numbers.get("chance_good") is None else report._chance(numbers)), esc(state), esc(state),
+                        esc(report._chance(numbers).replace("-", "–") if numbers.get("chance_good") is None else report._chance(numbers)), esc(state.split(" ")[0]), esc(state),
                     )
                 )
         parts.append(
@@ -292,35 +299,55 @@ class App:
 
     def decision(self, decision_id: str, notice: str = "", error: bool = False) -> str:
         decision = ops.get_decision(self.settings, decision_id)
+        status = decisions.summary(decision)["status"]  # shows an overdue pending decision as expired
         body = self._notice(notice, error)
         body += (
             '<div class="card"><div class="row"><h1>%s</h1><span class="badge %s">%s</span></div>'
             '<p class="muted">Decision %s · proposed by %s at %s</p>'
-            % (esc(decision["headline"]), esc(decision["status"]), esc(decision["status"]), esc(decision["id"]), esc(decision["proposed_by"]), esc(decision["proposed_at"]))
+            % (esc(decision["headline"]), esc(status), esc(status), esc(decision["id"]), esc(decision["proposed_by"]), esc(decision["proposed_at"]))
         )
         if decision.get("note"):
             body += "<p>Note from the proposer: %s</p>" % esc(decision["note"])
         approval = decision.get("approval")
         if approval:
-            body += "<p><b>Approved by %s</b> at %s (%s). Flagsmith: %s.</p>" % (
-                esc(approval["by"]), esc(approval["at"]), esc(approval["method"]), esc(json.dumps(decision.get("applied"))),
+            applied = decision.get("applied") or {}
+            body += (
+                "<p><b>Approved by %s</b> at %s, through the %s.</p>"
+                '<p class="muted small">Flagsmith ended the experiment at %s with the decision <code>%s</code>. '
+                "The results relied on were computed at %s%s.</p>"
+                % (
+                    esc(approval["by"]), esc(approval["at"]), esc("terminal" if approval["method"] == "cli" else approval["method"]),
+                    esc(applied.get("ended_at")), esc(applied.get("rollout_decision")), esc(approval.get("results_as_of")),
+                    "; the numbers had moved since the proposal, and the call was the same" if approval.get("evidence_changed_since_proposal") else "",
+                )
             )
+            if approval.get("note"):
+                body += "<p>Note from the approver: %s</p>" % esc(approval["note"])
         if decision.get("rejection"):
             body += "<p><b>Rejected by %s</b> at %s. %s</p>" % (
                 esc(decision["rejection"]["by"]), esc(decision["rejection"]["at"]), esc(decision["rejection"].get("reason")),
             )
         if decision.get("stale_reason"):
             body += "<p><b>No longer valid.</b> %s</p>" % esc(decision["stale_reason"])
-        if decision["status"] == "pending":
+        if status == "expired":
+            body += "<p><b>Expired</b> at %s without a decision. Ask for a new proposal so it rests on current data.</p>" % esc(decision["expires_at"])
+        body += "</div>"
+
+        # Evidence first, the decision after it: nobody should meet the
+        # approve button before the numbers it rests on.
+        body += '<div class="card"><h2 style="margin-top:0">Evidence when proposed</h2>%s</div>' % scorecard_html(decision["scorecard"])
+        if status == "pending":
             effect = (
                 "serve <code>%s</code> to everyone" % esc(decision["variant_key"])
                 if decision["action"] == "ship_variant"
                 else "serve the control version to everyone"
             )
             body += (
-                '<h2>Approve</h2><p>Approving ends the experiment in Flagsmith and makes the flag <code>%s</code> %s. '
-                "It is done with your Flagsmith account, so the audit log names you. Referee re-checks the live data first "
-                "and refuses if the call has changed.</p>"
+                '<div class="card"><h2 style="margin-top:0">Your decision</h2>'
+                "<p>Approving ends the experiment in Flagsmith and makes the flag <code>%s</code> %s. "
+                "It is done with your Flagsmith account, so the audit log names you. Referee re-checks Flagsmith's "
+                "latest results first and refuses if the call has changed.</p>"
+                '<div class="choices">'
                 '<form class="approve" method="post" action="/decision/%s/approve" autocomplete="off">'
                 '<input type="hidden" name="form_token" value="%s">'
                 '<label>Flagsmith email<input type="email" name="email" required></label>'
@@ -329,13 +356,13 @@ class App:
                 "<button>Approve and roll out</button></form>"
                 '<form class="approve" method="post" action="/decision/%s/reject">'
                 '<input type="hidden" name="form_token" value="%s">'
-                '<label>Reason for rejecting<input type="text" name="reason"></label>'
                 '<label>Your name<input type="text" name="by" required></label>'
+                '<label>Reason for rejecting<input type="text" name="reason"></label>'
                 '<button class="secondary">Reject</button></form>'
-                '<p class="small muted">Expires %s.</p>'
+                "</div>"
+                '<p class="small muted">This proposal expires %s.</p></div>'
                 % (esc(decision["flag"]), effect, esc(decision["id"]), esc(self.form_token), esc(decision["id"]), esc(self.form_token), esc(decision["expires_at"]))
             )
-        body += "</div><div class=\"card\"><h2 style=\"margin-top:0\">Evidence when proposed</h2>%s</div>" % scorecard_html(decision["scorecard"])
         return page("Decision " + decision["id"], body)
 
     @staticmethod

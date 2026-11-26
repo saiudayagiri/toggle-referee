@@ -35,7 +35,7 @@ EXCLUDED_WARN_SHARE = 0.01
 EXCLUDED_BLOCK_SHARE = 0.05
 OVERWHELMING = 0.999
 # A guardrail below this chance of having held is mentioned to the approver.
-LEANING_WORSE = 0.2
+LEANING_WORSE = 0.25
 # Without a planned sample size there is no stopping point fixed in advance, so
 # a win is only called after a full weekly cycle (or when it is overwhelming).
 UNPLANNED_MIN_DAYS = 7.0
@@ -346,6 +346,13 @@ def judge(
                 # Only Flagsmith's own inference can make a metric "winning"
                 # or "losing"; the fallback is used for guardrails alone.
                 entry["state"] = _state(chance if source == "flagsmith" else None, threshold, harm_threshold)
+                if goal in ("not_increase", "not_decrease") and chance is not None:
+                    # A guardrail is never "winning"; what matters is whether it held.
+                    entry["state"] = (
+                        "worse" if chance <= harm_threshold
+                        else "leans worse" if chance < LEANING_WORSE
+                        else "held"
+                    )
             per_arm[key] = entry
         metrics.append(
             {
@@ -572,6 +579,11 @@ def _verdict(
     treatments = [a for a in arms if a["key"] != CONTROL_KEY and a["in_experiment"]]
 
     def result(call: str, headline: str, variant: Optional[Dict[str, Any]] = None, actionable: bool = False) -> Dict[str, Any]:
+        if actionable and 0 < (progress.get("days_of_data") or 0) <= 1:
+            reasons.append(
+                "All of this data arrived within a single day, so it has not seen a full daily or weekly cycle. "
+                "If behaviour differs by time of day or day of week, that is not in these numbers."
+            )
         return {
             "call": call,
             "headline": headline,

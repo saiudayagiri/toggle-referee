@@ -140,7 +140,11 @@ TOOLS: List[Dict[str, Any]] = [
     _tool(
         "propose_rollout",
         "Record a proposal to end the experiment and serve the winner (or keep control). Only possible when the scorecard's call is ship_variant or keep_control. Changes nothing in Flagsmith; a person must approve it.",
-        {"experiment": _EXPERIMENT, "note": {"type": "string", "description": "A note for the approver."}}, ["experiment"],
+        {
+            "experiment": _EXPERIMENT,
+            "note": {"type": "string", "description": "A note for the approver."},
+            "valid_hours": {"type": "number", "minimum": 1, "maximum": 168, "description": "How long the proposal waits for approval. Default 24. The experiment keeps running meanwhile; an expired proposal can be made again."},
+        }, ["experiment"],
     ),
     _tool(
         "decision_status",
@@ -288,7 +292,13 @@ class Server:
         return text, card
 
     def _propose(self, args: Dict[str, Any]) -> Tuple[str, Any]:
-        decision = ops.propose(self.settings, args["experiment"], proposed_by="agent (MCP)", note=str(args.get("note") or "")[:2000])
+        valid = args.get("valid_hours")
+        if valid is not None and (isinstance(valid, bool) or not isinstance(valid, (int, float))):
+            raise ValueError("valid_hours must be a number")
+        decision = ops.propose(
+            self.settings, args["experiment"], proposed_by="agent (MCP)",
+            note=str(args.get("note") or "")[:2000], valid_hours=valid,
+        )
         text = (
             report.decision_text(decision)
             + "\n\nNothing has changed in Flagsmith. Ask the person to review and approve it themselves:\n"

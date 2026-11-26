@@ -112,7 +112,7 @@ class PreflightTests(unittest.TestCase):
         result = run(source=None, client=Fake(seen=["$flag_exposure", "signupCompleted", "signup_error"]))
         self.assertFalse(result["ready"])
         self.assertEqual(status_of(result, "event_seen:signup_completed"), "fail")
-        self.assertEqual(status_of(result, "event_seen:signup_error"), "pass")
+        self.assertEqual(status_of(result, "event_seen:signup_error"), "info")
 
     def test_no_events_yet_is_only_information(self):
         result = run(source=None)

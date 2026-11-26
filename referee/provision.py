@@ -213,7 +213,11 @@ def _apply(client: Flagsmith, plan: Plan, out: Provisioned) -> Provisioned:
         )
         if match:
             out.metric_ids[ident] = match["id"]
-            say("Metric '%s' already exists (event '%s')." % (match["name"], metric.event))
+            shared = len(match.get("experiments") or [])
+            say(
+                "Metric '%s' already exists with the same event ('%s'), aggregation and direction; reusing it%s."
+                % (match["name"], metric.event, " (%d other experiment(s) use it too)" % shared if shared else "")
+            )
         elif dry_run:
             say("Would create metric '%s' counting the event '%s' (%s)." % (metric.name, metric.event, metric.aggregation))
         else:

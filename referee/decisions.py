@@ -30,6 +30,10 @@ from .spec import parse_time
 
 ACTIONABLE = ("ship_variant", "keep_control")
 EXPIRES_AFTER = timedelta(hours=24)
+# The longest a proposal may wait for its approver. Approval re-checks live
+# data anyway, so a longer wait cannot apply a stale call; this only bounds
+# how long an open question is left lying around.
+MAX_VALID_HOURS = 168
 GENESIS = "0" * 64
 MAX_NOTE = 2000
 # Flagsmith recomputes results at most every five minutes. Approval accepts
@@ -162,8 +166,14 @@ class Ledger:
         environment_key: str,
         proposed_by: str = "agent",
         note: str = "",
+        valid_hours: Optional[float] = None,
     ) -> Dict[str, Any]:
         verdict = card["verdict"]
+        lifetime = EXPIRES_AFTER
+        if valid_hours is not None:
+            if not 1 <= float(valid_hours) <= MAX_VALID_HOURS:
+                raise DecisionError("A proposal can stay open for between 1 and %d hours." % MAX_VALID_HOURS)
+            lifetime = timedelta(hours=float(valid_hours))
         if verdict["call"] not in ACTIONABLE or not verdict.get("actionable"):
             raise DecisionError(
                 "Nothing to propose: the call is '%s' (%s). A rollout can only be "
@@ -194,7 +204,7 @@ class Ledger:
                 "scorecard": card,
                 "proposed_by": proposed_by,
                 "proposed_at": _stamp(now),
-                "expires_at": _stamp(now + EXPIRES_AFTER),
+                "expires_at": _stamp(now + lifetime),
                 "note": str(note)[:MAX_NOTE],
                 "approval": None,
             }

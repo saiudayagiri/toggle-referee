@@ -372,13 +372,15 @@ def get_scorecard(settings: Settings, experiment: Any, refresh: bool = True) -> 
     return card
 
 
-def propose(settings: Settings, experiment: Any, proposed_by: str = "agent", note: str = "") -> Dict[str, Any]:
+def propose(
+    settings: Settings, experiment: Any, proposed_by: str = "agent", note: str = "", valid_hours: Optional[float] = None
+) -> Dict[str, Any]:
     """Record a rollout proposal for a person to approve. Changes nothing in Flagsmith."""
     card = get_scorecard(settings, experiment)
     card.pop("pending_decision", None)
     ledger = decisions.Ledger(settings.state_dir)
     try:
-        decision = ledger.propose(card, settings.environment_key, proposed_by=proposed_by, note=note)
+        decision = ledger.propose(card, settings.environment_key, proposed_by=proposed_by, note=note, valid_hours=valid_hours)
     except decisions.DecisionError as error:
         raise OpError(str(error))
     return decision

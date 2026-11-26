@@ -73,6 +73,7 @@ class ScanResult:
     files_scanned: int = 0
     files_skipped: int = 0
     unnamed_tracks: List[Reference] = field(default_factory=list)
+    unnamed_reads: List[Reference] = field(default_factory=list)
     references: List[Reference] = field(default_factory=list)
     tracked_events: Dict[str, List[Reference]] = field(default_factory=dict)
     values_seen: Dict[str, List[Reference]] = field(default_factory=dict)
@@ -145,19 +146,48 @@ def _quoted(value: str) -> "re.Pattern[str]":
     return re.compile(r"""(?<!`)(['"`])%s\1(?!`)""" % re.escape(value))
 
 
+# A name bound to nothing but a string: FLAG = "signup_form", const EVENT = 'x';
+_CONSTANT = re.compile(
+    r"""(?m)^[ \t]*(?:export[ \t]+)?(?:const|let|var|final|static|public|private|val)?[ \t]*"""
+    r"""(?:[A-Za-z_][\w<>\[\]]*[ \t]+)?([A-Za-z_]\w*)[ \t]*(?::[^=\n]{1,40})?=[ \t]*(['"`])([^'"`\n]{1,200})\2[ \t]*;?[ \t]*$"""
+)
+_ARGUMENT_NAME = r"((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*)"
+_TRACK_BY_NAME = re.compile(
+    # The first one or two plain-name arguments of a track call. Which of them
+    # is the event (Go and Java put a context first) is settled by looking the
+    # names up among the string constants.
+    r"\b" + _CALL_NAME + r"\s*(?:<[^<>()]*>)?\s*\(\s*(?:event\s*=\s*)?" + _ARGUMENT_NAME
+    + r"\s*(?:,\s*(?:event\s*=\s*)?" + _ARGUMENT_NAME + r")?\s*[,)]"
+)
+
+
+def _read_by_name() -> "re.Pattern[str]":
+    names = "|".join(re.escape(n) for n in EXPOSING_CALLS + PLAIN_READ_CALLS)
+    return re.compile(
+        r"\b(" + names + r")\s*(?:<[^<>()]*>)?\s*\(\s*" + _LEADING_ARGUMENT + r"(?:feature_name\s*=\s*)?" + _ARGUMENT_NAME + r"\s*[,)]"
+    )
+
+
 def scan(root: Path, flag: str, values: Optional[Iterable[str]] = None) -> ScanResult:
     """Scan ``root`` for uses of ``flag``, tracked events and variant values.
 
     ``values`` are the strings the flag can serve; seeing them as string
     literals in a file that uses the flag is the evidence that the code
     handles each version. Comments and docstrings are blanked out first, so a
-    commented-out call never counts as instrumentation.
+    commented-out call never counts as instrumentation. A flag or event name
+    held in a simple constant (``FLAG = "signup_form"``) is followed to the
+    calls that use the constant.
     """
     root = Path(root)
     result = ScanResult(root=str(root))
     flag_literal = _quoted(flag)
     value_patterns = {value: _quoted(value) for value in (values or []) if value and value != flag}
     result.files_skipped = count_skipped(root)
+
+    # Pass 1: read the files that could matter, strip their comments, and
+    # collect the names bound to string constants anywhere in the tree.
+    files = []
+    constants: Dict[str, Set[str]] = {}
     for path in iter_source_files(root):
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
@@ -165,34 +195,75 @@ def scan(root: Path, flag: str, values: Optional[Iterable[str]] = None) -> ScanR
             result.files_skipped += 1
             continue
         result.files_scanned += 1
-        mentions_flag = flag in text
-        if not mentions_flag and "rack" not in text and "ser." not in text:
+        if flag not in text and "rack" not in text and "ser." not in text and "xperiment" not in text:
             continue  # nothing this scan looks for
-        relative = str(path.relative_to(root))
-        lines = text.splitlines()
         code = strip_comments(text, path.suffix.lower())
+        files.append((str(path.relative_to(root)), text, code))
+        for match in _CONSTANT.finditer(code):
+            constants.setdefault(match.group(1), set()).add(match.group(3))
+    flag_names = {name for name, literals in constants.items() if flag in literals}
+    read_by_name = _read_by_name()
+
+    # Pass 2: find the reads and the event calls.
+    for relative, text, code in files:
+        mentions_flag = flag in text
+        lines = text.splitlines()
         code_lines = code.splitlines()
         code_lines += [""] * (len(lines) - len(code_lines))
+        starts = _line_starts(code)
+
+        def line_of(position: int) -> int:
+            return bisect.bisect_right(starts, position)
+
+        def snippet_at(number: int) -> str:
+            return lines[number - 1].strip()[:200] if 0 < number <= len(lines) else ""
 
         # Event calls may span lines, so they are matched on the whole file.
-        starts = _line_starts(code)
-        literal_lines = set()
+        seen = set()
         for pattern in _TRACK_PATTERNS:
             for match in pattern.finditer(code):
-                number = bisect.bisect_right(starts, match.start())
-                if (number, match.group(2)) in literal_lines:
+                number = line_of(match.start())
+                if (number, match.group(2)) in seen:
                     continue
-                literal_lines.add((number, match.group(2)))
+                seen.add((number, match.group(2)))
                 result.tracked_events.setdefault(match.group(2), []).append(
-                    Reference(relative, number, lines[number - 1].strip()[:200], "track")
+                    Reference(relative, number, snippet_at(number), "track")
                 )
-        named_lines = {number for number, _ in literal_lines}
+        for match in _TRACK_BY_NAME.finditer(code):
+            # track_event(SIGNUP_DONE, ...): follow the constant if there is one.
+            number = line_of(match.start())
+            literals: Set[str] = set()
+            for group in (1, 2):
+                if match.group(group) and not literals:
+                    literals = constants.get(match.group(group).split(".")[-1], set())
+            for literal in sorted(literals):
+                if (number, literal) not in seen:
+                    seen.add((number, literal))
+                    result.tracked_events.setdefault(literal, []).append(
+                        Reference(relative, number, snippet_at(number), "track")
+                    )
+        named_lines = {number for number, _ in seen}
         for match in _ANY_TRACK_CALL.finditer(code):
-            number = bisect.bisect_right(starts, match.start())
-            if number not in named_lines:
-                # An event sent under a name this scan cannot read: a constant,
-                # a variable, or an expression.
-                result.unnamed_tracks.append(Reference(relative, number, lines[number - 1].strip()[:200], "track"))
+            number = line_of(match.start())
+            if number not in named_lines and not _DEFINITION.search(code_lines[number - 1] if number <= len(code_lines) else ""):
+                # An event sent under a name this scan cannot read: a variable
+                # or an expression.
+                result.unnamed_tracks.append(Reference(relative, number, snippet_at(number), "track"))
+
+        # Reads of the flag through a constant: get_experiment_flag(FLAG, ...)
+        constant_reads = set()
+        for match in read_by_name.finditer(code):
+            number = line_of(match.start())
+            name = match.group(2).split(".")[-1]
+            exposing = match.group(1) in EXPOSING_CALLS
+            if name in flag_names:
+                constant_reads.add(number)
+                result.references.append(
+                    Reference(relative, number, snippet_at(number), "exposing" if exposing else "plain_read")
+                )
+            elif exposing and name not in constants and name not in ("self", "this"):
+                result.unnamed_reads.append(Reference(relative, number, snippet_at(number), "exposing"))
+
         for number, line in enumerate(lines, start=1):
             snippet = line.strip()[:200]
             live = code_lines[number - 1]
@@ -201,7 +272,7 @@ def scan(root: Path, flag: str, values: Optional[Iterable[str]] = None) -> ScanR
             if not mentions_flag:
                 continue
             found = flag_literal.search(live)
-            if found:
+            if found and number not in constant_reads:
                 # The call the literal belongs to is the nearest SDK call before
                 # it, on this line or the few above (calls are often split).
                 before = "\n".join(code_lines[max(0, number - 6):number - 1] + [live[:found.start()]])
@@ -214,16 +285,23 @@ def scan(root: Path, flag: str, values: Optional[Iterable[str]] = None) -> ScanR
                 # A closed statement between the call and the literal means they are unrelated.
                 if nearest >= 0 and ";" in before[nearest:].replace(";\n", ";") and before[nearest:].count("(") <= before[nearest:].count(")"):
                     kind = "mention"
+                if kind == "mention" and _CONSTANT.search(live):
+                    kind = "constant"  # where the name is defined, not a read
                 result.references.append(Reference(relative, number, snippet, kind))
-            elif flag_literal.search(line):
+            elif not found and flag_literal.search(line):
                 # Only inside a comment or docstring: worth listing, never instrumentation.
                 result.references.append(Reference(relative, number, snippet, "mention"))
             for value, pattern in value_patterns.items():
                 if pattern.search(live):
                     result.values_seen.setdefault(value, []).append(Reference(relative, number, snippet, "value"))
+    result.references.sort(key=lambda r: (r.file, r.line))
     for references in result.tracked_events.values():
         references.sort(key=lambda r: (r.file, r.line))
     return result
+
+
+# "def track_event(" / "function trackEvent(": a definition, not a call that sends something.
+_DEFINITION = re.compile(r"\b(?:def|function|func|fun)\s+" + _CALL_NAME + r"\b")
 
 
 def _line_starts(text: str) -> List[int]:

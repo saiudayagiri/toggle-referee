@@ -20,19 +20,36 @@ Handing experiments to a coding agent makes each of these more likely, not less,
 
 ## What Referee does
 
-| Step | Command / MCP tool | What happens in Flagsmith |
-|---|---|---|
-| Plan | `referee plan` / `check_plan` | Nothing. Validates the plan and works out how many identities each version needs and how long that takes at your traffic. Refuses a "test" that leaves control under 10% of the traffic: that is a rollout. A deadline in the plan is for planning only: Referee warns when the sample cannot arrive in time, and never treats a passed deadline as a reason to call a result. |
-| Set up | `referee apply` / `apply_plan` | Creates the multivariate flag, **keyed** variants, metrics and the experiment, and records the planned rollout and sample size in the experiment itself. The experiment is created with a live rollout of 0%, because Flagsmith serves a rollout from the moment it exists; nobody gets a variant until it is started. Safe to repeat: it reuses what matches. It stops, before creating anything, if an existing experiment or variant differs from the plan or if the plan's control is not what the flag serves today. |
-| Preflight | `referee preflight` / `preflight` | Reads the experiment and scans your code: does it record exposures, does it send the exact events the metrics count, is every version handled? |
-| Start | `referee start` / `start_experiment` | Starts the experiment and raises its rollout from 0% to the planned percentage; refuses to while preflight fails. Through MCP it also refuses an experiment that would put more than half of all users on new versions; a person starts those. |
-| Pause | `referee pause` / `pause_experiment` | Pauses the experiment and drops its rollout back to 0%, so everyone gets the flag's normal value. It also works on an experiment that is not running but is serving anyway. (Flagsmith's own pause changes the status only and keeps serving the split.) Starting again restores the same assignments. |
-| Watch | `referee scorecard` / `scorecard` | Reads Flagsmith's lift, interval and chance to win, adds the checks around them, and makes one call. |
-| Propose | `referee propose` / `propose_rollout` | Nothing. Records a proposal with the evidence it rests on. |
-| **Approve** | `referee approve` or the dashboard. **No MCP tool.** | A person signs in to Flagsmith; the experiment is completed and the winner rolled out **with that person's token**. |
-| Clean up | `referee cleanup` / `cleanup_report` | Lists the flag reads and losing-version code left to delete; can upload code references to Flagsmith. |
+```mermaid
+flowchart LR
+    subgraph agent["The agent may"]
+        direction LR
+        P[Plan] --> S[Set up] --> C[Preflight] --> G[Start] --> W[Scorecard] --> R[Propose]
+    end
+    subgraph person["Only a person may"]
+        A[Approve and roll out]
+    end
+    R -- "decision id" --> A
+    A --> F[(Flagsmith serves the winner)]
+```
 
-While an experiment runs the call is one of `collecting`, `keep_running`, `investigate`, `ship_variant` or `keep_control`; before and after, it is `not_started` or `completed`.
+| Step | Command / MCP tool | What it does |
+|---|---|---|
+| Plan | `referee plan` / `check_plan` | Validates the plan and works out how many identities each version needs, and how long that takes at your traffic. Touches nothing. |
+| Set up | `referee apply` / `apply_plan` | Creates the flag, keyed variants, metrics and experiment in Flagsmith, at 0% rollout so nobody is served a variant yet. Refuses a plan whose control is not what users get today. |
+| Preflight | `referee preflight` / `preflight` | Reads Flagsmith and scans your code: are exposures recorded, are the exact events the metrics count being sent, is every version handled? |
+| Start | `referee start` / `start_experiment` | Starts the experiment and raises its rollout to the planned percentage. Refuses while preflight fails. |
+| Pause | `referee pause` / `pause_experiment` | Pauses and drops the rollout to 0%, so everyone gets the normal version again. Resuming restores the same assignments. |
+| Watch | `referee scorecard` / `scorecard` | Shows Flagsmith's lift, interval and chance to win, runs the fairness checks, and makes one call. |
+| Propose | `referee propose` / `propose_rollout` | Records a proposal with the evidence it rests on. Changes nothing in Flagsmith. |
+| **Approve** | `referee approve` or the dashboard. **No MCP tool.** | A person signs in to Flagsmith. The experiment is completed and the winner rolled out **with that person's token**. |
+| Clean up | `referee cleanup` / `cleanup_report` | Lists the flag reads and losing-version code left to delete. |
+
+While an experiment runs the call is one of `collecting`, `keep_running`, `investigate`, `ship_variant` or `keep_control`; before and after, it is `not_started` or `completed`. The rules behind each call are in [The checks](#the-checks), and what approval does and does not guarantee is in [A person approves](#a-person-approves).
+
+This is the page the person sees when an agent proposes a rollout: the evidence, then the decision.
+
+![Referee's approval page: the scorecard an agent's proposal rests on, followed by the approve and reject forms](docs/images/decision.png)
 
 ## Try it in five minutes
 
@@ -60,37 +77,38 @@ python3 -m referee ledger
 What the scorecard looks like. This is unedited output from a run of the sample app with 2,400 simulated visitors:
 
 ```text
-Scorecard: Signup form length (experiment 55, flag 'signup_form', running)
+Scorecard: Signup form length (experiment 118, flag 'signup_form', running)
   Hypothesis: A three-field signup form gets more completed signups than the six-field form, because every extra field is a reason to leave.
-  Flagsmith results as of 2026-11-24T04:45:26.959770Z (under a minute ago)
+  Flagsmith results as of 2026-11-26T22:53:43.594809Z (under a minute ago)
 
 Versions
   version       serves          identities  planned  observed
   ------------  --------------  ----------  -------  --------
-  control       'six_fields'    1205        50%      50.2%
-  three_fields  'three_fields'  1195        50%      49.8%
+  control       'six_fields'    1170        50%      48.8%
+  three_fields  'three_fields'  1230        50%      51.2%
 
 Signup completed  [primary, occurrence, should increase]
-  version       value             lift      95% interval      chance to win  state
-  ------------  ----------------  --------  ----------------  -------------  -------
-  control       21.3% (257/1205)  baseline
-  three_fields  32.8% (392/1195)  +53.8%    +33.0% to +74.6%  >99.9%         winning
+  version       value             lift      95% interval     chance to win  state
+  ------------  ----------------  --------  ---------------  -------------  -------
+  control       22.0% (257/1170)  baseline
+  three_fields  27.8% (342/1230)  +26.6%    +8.8% to +44.4%  99.8%          winning
 
 Signup error shown  [guardrail, occurrence, should not increase]
-  version       value           lift      95% interval       chance it held  state
-  ------------  --------------  --------  -----------------  --------------  ------------
-  control       0.7% (8/1205)   baseline
-  three_fields  0.8% (10/1195)  +26.0%    -90.8% to +142.8%  33.1%           inconclusive
+  version       value           lift      95% interval      chance it held  state
+  ------------  --------------  --------  ----------------  --------------  -----
+  control       1.0% (12/1170)  baseline
+  three_fields  1.1% (13/1230)  +3.0%     -77.4% to +83.5%  47.0%           held
 
-Progress: 1195 of 956 identities in the smallest version (100%)
+Progress: planned sample reached (1170 identities in the smallest version, planned 956)
 Checks
   [PASS] Traffic split matches the plan
-         Expected control 50% / three_fields 50%, saw control 1205 (50.2%) / three_fields 1195 (49.8%) (p = 0.84).
+         Expected control 50% / three_fields 50%, saw control 1170 (48.8%) / three_fields 1230 (51.2%) (p = 0.22).
 
 CALL: SHIP THE VARIANT. Ship 'three_fields'.
-  - 'three_fields' beats control on 'Signup completed': +53.8% lift (95% interval +33.0% to +74.6%), >99.9% chance to beat control (needs 95.0%).
+  - 'three_fields' beats control on 'Signup completed': +26.6% lift (95% interval +8.8% to +44.4%), 99.8% chance to beat control (needs 95.0%).
   - No guardrail metric got reliably worse for 'three_fields'.
-  - The planned sample is in: 1195 identities in the smallest version (planned 956).
+  - The planned sample is in: 1170 identities in the smallest version (planned 956).
+  - All of this data arrived within a single day, so it has not seen a full daily or weekly cycle. If behaviour differs by time of day or day of week, that is not in these numbers.
 ```
 
 ## Use it on your own Flagsmith
@@ -150,6 +168,8 @@ Then ask in plain words:
 
 The server also offers this as a prompt (`run_experiment`), and its instructions tell the agent the order of work: check the plan and show you the sizing, apply it, instrument the code, pass preflight, ask before starting, read the scorecard, and hand you a decision id to approve. [`AGENTS.md`](AGENTS.md) has the same guidance for agents that read it.
 
+**Does it work with a real agent?** [`docs/AGENT_RUN.md`](docs/AGENT_RUN.md) records one: a fresh agent given an uninstrumented app, `AGENTS.md` and a one-paragraph request instrumented the code, ran the experiment, proposed the rollout and stopped at approval. It also lists the eleven things that run changed in Referee.
+
 Twelve tools are exposed: `referee_status`, `check_plan`, `apply_plan`, `preflight`, `start_experiment`, `pause_experiment`, `list_experiments`, `scorecard`, `propose_rollout`, `decision_status`, `cleanup_report`, `stale_flags`.
 
 ## How Flagsmith is used
@@ -178,6 +198,7 @@ Flagsmith is not an add-on here; Referee is a layer over it and does nothing wit
 - *Peeking.* A lead is not a win until the planned sample is in. The only exception is a result of 99.9% or more; a passed deadline is not one. The planned sample is written into the experiment in Flagsmith (a note at the end of its hypothesis) when it is set up, so the target travels with the experiment to every machine and checkout, and it is fixed once the experiment starts: applying an easier plan later, from anywhere, does not move it. An experiment with no planned sample (created elsewhere, or a plan without sizing assumptions) is only called once data has come in on seven separate days (days that each carried a real share of the traffic, so neither a pause nor one stray early visitor counts), or on a result of 99.9% or more.
 - *The planned sample has a floor.* The sizing is the stopping rule, so a plan cannot make it trivially easy: power is at least 80%, and the planned sample is never below 200 identities per version, whatever effect size the assumptions claim.
 - *Ending early for a loss follows the same rule.* A variant that is behind, or blocked by a guardrail, on a small sample gets `keep_running`, not `keep_control`, unless the evidence against it is overwhelming. Pause it if you want to stop the exposure meanwhile.
+- *Not a rollout in disguise.* A plan that leaves control under 10% of the traffic is refused: giving nearly everyone the new version is a rollout, and rollouts are for a person to approve. A deadline in a plan is for planning only; Referee warns when the sample cannot arrive in time.
 - *Control is the status quo.* A plan whose control value is not exactly what the flag serves today is refused. So is a flag that already serves a variant by default (Flagsmith resets those defaults the moment an experiment is created on it), a flag that is switched off (the experiment would switch it on), a flag with no value or a non-text value, and any flag whose current state cannot be read. Otherwise "control" would itself be a change, and far more users would be moved than the split suggests. Preflight makes the same check on experiments created elsewhere, and warns when an experiment that is not running is nonetheless serving its split.
 - *Broken tracking in one version.* If one version records no conversions at all while another records plenty, the call is `investigate`, not an endless `collecting`.
 - *Several variants.* The bar for each rises with the number of variants compared (Bonferroni), so testing more versions does not make a false win more likely.
@@ -223,7 +244,7 @@ python3 -m unittest discover -s tests -t .    # unit tests, no network
 python3 tests/live.py                         # full lifecycle against the demo Flagsmith
 ```
 
-The 184 unit tests cover the verdict rules, the data-quality checks, the plan validator, the code scan, the approval rules, the ledger, the dashboard's request checks and the MCP protocol. Five of the test files (`test_review.py`, `test_hostile.py`, `test_round2.py`, `test_round3.py`, `test_round4.py`) are regression tests for defects found by four rounds of independent review and outside-in testing of earlier versions. `tests/live.py` runs real experiments against the Flagsmith from `./demo/up.sh`: one that checks what identities are actually served after apply (control only), after start (both versions), after pause (control only) and after resuming (the same people get the same versions); a winner that is proposed, refused for the agent's key, approved by a person and then served to new users; no difference (control is kept); a broken split; exposures sent under the wrong key; a misspelt event name that makes preflight fail and `start` refuse; a second experiment on a flag that already serves its winner, and a plan that labels the new value "control" (both refused); and a paused experiment whose decision is approved. The MCP server has also been exercised with the official MCP Python client.
+The 199 unit tests cover the verdict rules, the data-quality checks, the plan validator, the code scan, the approval rules, the ledger, the dashboard's request checks and the MCP protocol. Six of the test files are regression tests: `test_review.py`, `test_hostile.py` and `test_round2.py` to `test_round4.py` for defects found by four rounds of independent review and outside-in testing of earlier versions, and `test_agent_feedback.py` for what a fresh coding agent stumbled on when it ran an experiment with Referee from the guide alone. `tests/live.py` runs real experiments against the Flagsmith from `./demo/up.sh`: one that checks what identities are actually served after apply (control only), after start (both versions), after pause (control only) and after resuming (the same people get the same versions); a winner that is proposed, refused for the agent's key, approved by a person and then served to new users; no difference (control is kept); a broken split; exposures sent under the wrong key; a misspelt event name that makes preflight fail and `start` refuse; a second experiment on a flag that already serves its winner, and a plan that labels the new value "control" (both refused); and a paused experiment whose decision is approved. The MCP server has also been exercised with the official MCP Python client.
 
 ## Limits
 
@@ -241,7 +262,7 @@ referee/        the package: api, spec, provision, preflight, scorecard, decisio
 demo/           sample app, visitor simulator, plan, up.sh and walkthrough.sh
 scripts/        bootstrap.py, which prepares a fresh Flagsmith
 tests/          unit tests and the live lifecycle test
-docs/           how the code works, demo video script, upstream issue write-ups
+docs/           how the code works, a recorded agent run, demo video script, upstream issue write-ups
 AGENTS.md       how a coding agent should run an experiment with Referee
 ```
 

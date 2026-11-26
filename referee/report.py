@@ -70,6 +70,11 @@ def plan_text(plan: Plan) -> str:
     for variant in plan.variants:
         lines.append("              %s = '%s' (%g%%)" % (variant.key, variant.value, variant.share))
     lines.append("  Audience:   %g%% of identities enter the experiment" % plan.rollout_percentage)
+    exposed = plan.rollout_percentage * (100.0 - plan.control_share) / 100.0
+    lines.append(
+        "  Exposure:   starting it puts %g%% of all users on a new version%s"
+        % (exposed, "" if exposed <= 50 else " (over 50%, so a person has to start it; an agent cannot)")
+    )
     for metric in plan.metrics:
         role = "guardrail" if metric.is_guardrail else ("primary" if metric is plan.primary else "secondary")
         lines.append(
@@ -231,15 +236,21 @@ def scorecard_text(card: Dict[str, Any]) -> str:
 
     progress = card["progress"]
     if progress.get("needed_per_arm"):
-        lines.append(
-            "Progress: %d of %d identities in the smallest version (%s)%s"
-            % (
-                progress["smallest_arm"],
-                progress["needed_per_arm"],
-                _pct(progress["fraction"], 0),
-                ", about %s to go" % sc.duration(progress["eta_hours"]) if progress.get("eta_hours") else "",
+        if progress["smallest_arm"] >= progress["needed_per_arm"]:
+            lines.append(
+                "Progress: planned sample reached (%d identities in the smallest version, planned %d)"
+                % (progress["smallest_arm"], progress["needed_per_arm"])
             )
-        )
+        else:
+            lines.append(
+                "Progress: %d of %d identities in the smallest version (%s)%s"
+                % (
+                    progress["smallest_arm"],
+                    progress["needed_per_arm"],
+                    _pct(progress["fraction"], 0),
+                    ", about %s to go" % sc.duration(progress["eta_hours"]) if progress.get("eta_hours") else "",
+                )
+            )
     elif experiment["status"] != "created":
         lines.append(
             "Progress: %d identities so far; no planned sample size on record."
@@ -320,6 +331,8 @@ def decision_text(decision: Dict[str, Any]) -> str:
     ]
     if decision["status"] == "pending":
         lines.append("  Expires:    %s" % decision["expires_at"])
+    if decision.get("note"):
+        lines.append("  Note:       %s" % decision["note"])
     for reason in decision.get("reasons", []):
         lines.append("  - %s" % reason)
     approval = decision.get("approval")

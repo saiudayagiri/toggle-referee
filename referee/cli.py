@@ -239,7 +239,7 @@ def cmd_watch(args: argparse.Namespace, settings: config.Settings) -> int:
 
 
 def cmd_propose(args: argparse.Namespace, settings: config.Settings) -> int:
-    decision = ops.propose(settings, args.experiment, proposed_by=_one_line(args.by), note=args.note)
+    decision = ops.propose(settings, args.experiment, proposed_by=_one_line(args.by), note=args.note, valid_hours=args.valid_hours)
     if args.json:
         _print_json(decisions.summary(decision))
         return 0
@@ -428,8 +428,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-C", "--directory", default=None, help="run as if started in this directory")
     sub = parser.add_subparsers(dest="command", metavar="command")
 
+    # The MCP tool names work as commands too, so a guide written for one
+    # front end can be followed in the other.
+    aliases = {
+        "plan": ["check_plan"], "apply": ["apply_plan"], "start": ["start_experiment"],
+        "pause": ["pause_experiment"], "list": ["list_experiments"], "propose": ["propose_rollout"],
+        "cleanup": ["cleanup_report"], "stale": ["stale_flags"], "doctor": ["referee_status"],
+        "decisions": ["decision_status"],
+    }
+
     def add(name: str, func: Any, help_text: str) -> argparse.ArgumentParser:
-        command = sub.add_parser(name, help=help_text, description=help_text)
+        command = sub.add_parser(name, aliases=aliases.get(name, []), help=help_text, description=help_text)
         command.set_defaults(func=func)
         command.add_argument("--json", action="store_true", help="print machine-readable JSON")
         return command
@@ -474,6 +483,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("experiment")
     p.add_argument("--by", default=os.environ.get("USER") or "cli", help="who is proposing")
     p.add_argument("--note", default="", help="a note for the approver")
+    p.add_argument("--valid-hours", type=float, default=None, metavar="H", help="how long the proposal waits for approval (default 24, at most 168); the experiment keeps running meanwhile, and an expired proposal can simply be made again")
 
     add("decisions", cmd_decisions, "List rollout decisions.")
 
