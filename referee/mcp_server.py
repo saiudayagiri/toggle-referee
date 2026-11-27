@@ -129,6 +129,17 @@ TOOLS: List[Dict[str, Any]] = [
         "Start an experiment. Runs preflight first and refuses if any check fails, or if the experiment would give new versions to more than half of all users (a person starts those). Ask the person before calling this: it exposes real users to the variants.",
         {"experiment": _EXPERIMENT, "code_root": _CODE_ROOT}, ["experiment"],
     ),
+    _tool(
+        "preview_version",
+        "Let one test identity (named 'referee-preview' or starting with it) get a chosen version of the experiment's flag, so each version can be tried end to end before real users see it. Affects that identity only; it is outside the experiment. Call again with clear=true when done.",
+        {
+            "experiment": _EXPERIMENT,
+            "version": {"type": "string", "description": "'control' or a variant key."},
+            "identity": {"type": "string", "description": "Test identity; must start with 'referee-preview'. Default 'referee-preview'."},
+            "clear": {"type": "boolean", "description": "Remove the preview instead of setting one."},
+        },
+        ["experiment"],
+    ),
     _tool("pause_experiment", "Pause a running experiment and stop serving it: its live rollout goes to 0%, so everyone gets the flag's normal value until it is started again (for example when the scorecard says investigate). Starting it again restores the same assignments.", {"experiment": _EXPERIMENT}, ["experiment"]),
     _tool("list_experiments", "List experiments in the environment with their status and any decision awaiting approval.", {}, read_only=True),
     _tool(
@@ -139,10 +150,12 @@ TOOLS: List[Dict[str, Any]] = [
     ),
     _tool(
         "propose_rollout",
-        "Record a proposal to end the experiment and serve the winner (or keep control). Only possible when the scorecard's call is ship_variant or keep_control. Changes nothing in Flagsmith; a person must approve it.",
+        "Record a proposal to end the experiment and serve the winner (or keep control). Only possible when the scorecard's call is ship_variant or keep_control; or, with void=true, when the call is investigate and the run should be ended without a result. Changes nothing in Flagsmith; a person must approve it.",
         {
             "experiment": _EXPERIMENT,
             "note": {"type": "string", "description": "A note for the approver."},
+            "void": {"type": "boolean", "description": "Only when the call is 'investigate' and the data is spoiled (for example a version could not be completed): propose ending this run without a result and keeping control. A person still approves. Afterwards the same plan can be applied again for a clean run."},
+            "reason": {"type": "string", "description": "With void: why the run cannot be trusted."},
             "valid_hours": {"type": "number", "minimum": 1, "maximum": 168, "description": "How long the proposal waits for approval. Default 24. The experiment keeps running meanwhile; an expired proposal can be made again."},
         }, ["experiment"],
     ),
@@ -196,6 +209,7 @@ class Server:
             "preflight": self._preflight,
             "start_experiment": self._start,
             "pause_experiment": self._pause,
+            "preview_version": self._preview,
             "list_experiments": self._list,
             "scorecard": self._scorecard,
             "propose_rollout": self._propose,
@@ -263,6 +277,15 @@ class Server:
             text += result["reason"]
         return text, result
 
+    def _preview(self, args: Dict[str, Any]) -> Tuple[str, Any]:
+        result = ops.preview(
+            self.settings, args["experiment"], str(args.get("version") or ""), str(args.get("identity") or ""),
+            clear=bool(args.get("clear")),
+        )
+        if result["cleared"]:
+            return "Preview cleared for '%s'; it gets what everyone gets again." % result["identity"], result
+        return "Identity '%s' now gets '%s'. %s" % (result["identity"], result["serves"], result["how"]), result
+
     def _pause(self, args: Dict[str, Any]) -> Tuple[str, Any]:
         result = ops.pause(self.settings, args["experiment"])
         text = "'%s' is now %s." % (result["name"], result["status"])
@@ -295,9 +318,13 @@ class Server:
         valid = args.get("valid_hours")
         if valid is not None and (isinstance(valid, bool) or not isinstance(valid, (int, float))):
             raise ValueError("valid_hours must be a number")
+        void = bool(args.get("void"))
+        if void and not str(args.get("reason") or "").strip():
+            raise ValueError("void needs a reason: say why this run should be ended without a result")
         decision = ops.propose(
             self.settings, args["experiment"], proposed_by="agent (MCP)",
             note=str(args.get("note") or "")[:2000], valid_hours=valid,
+            void_reason=str(args.get("reason"))[:2000] if void else None,
         )
         text = (
             report.decision_text(decision)

@@ -138,3 +138,133 @@ class ProposalTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PreviewTests(unittest.TestCase):
+    """`referee preview` lets one test identity see a chosen version."""
+
+    def setUp(self):
+        from tests.test_core import FakeFlagsmith
+        from tests.test_review import FakeSettings
+        from referee import ops
+
+        self.ops = ops
+        self.folder = tempfile.TemporaryDirectory()
+        self.client = FakeFlagsmith()
+        self.settings = FakeSettings(self.folder.name, self.client)
+        ops.apply_plan(self.settings, h.PLAN)
+        self.overrides = {}
+        client = self.client
+        client.identity_id = lambda identifier, create=False: 900 if (create or identifier in self.overrides) else None
+        client.identity_overrides = lambda identity_id, feature_id: list(self.overrides.values())
+
+        def set_override(identity_id, feature_id, value, shares):
+            self.overrides["referee-preview"] = {"id": 1, "value": value, "shares": shares}
+            return {"id": 1}
+
+        client.set_identity_override = set_override
+        client.delete_identity_override = lambda identity_id, override_id: self.overrides.clear()
+        client.identity_flags = lambda identifier: {"flags": [{
+            "feature": {"name": "signup_form"},
+            "feature_state_value": "three_fields" if any(v == 100.0 for v in self.overrides.get("referee-preview", {}).get("shares", {}).values()) else "six_fields",
+        }]}
+
+    def tearDown(self):
+        self.folder.cleanup()
+
+    def test_variant_and_control_can_be_previewed_and_cleared(self):
+        result = self.ops.preview(self.settings, 7, "three_fields")
+        self.assertEqual(result["serves"], "three_fields")
+        self.assertEqual(list(self.overrides["referee-preview"]["shares"].values()), [100.0])
+        result = self.ops.preview(self.settings, 7, "control")
+        self.assertEqual(result["serves"], "six_fields")
+        self.assertEqual(self.overrides["referee-preview"]["value"], "six_fields")
+        cleared = self.ops.preview(self.settings, 7, clear=True)
+        self.assertTrue(cleared["cleared"])
+        self.assertEqual(self.overrides, {})
+
+    def test_only_preview_identities_can_be_overridden(self):
+        for name in ("visitor-123", "alice@example.com", "x-referee-preview", "referee-preview/../x", "referee-preview" + "a" * 200):
+            with self.assertRaises(self.ops.OpError):
+                self.ops.preview(self.settings, 7, "three_fields", identity=name)
+        self.assertEqual(self.overrides, {})
+
+    def test_unknown_version_is_refused_with_the_choices(self):
+        with self.assertRaises(self.ops.OpError) as caught:
+            self.ops.preview(self.settings, 7, "bogus")
+        self.assertIn("control, three_fields", str(caught.exception))
+
+    def test_preview_changes_nothing_about_the_experiment(self):
+        before = dict(self.client.experiment(7)["experiment_rollout"])
+        calls = list(self.client.calls)
+        self.ops.preview(self.settings, 7, "three_fields")
+        self.assertEqual(self.client.experiment(7)["experiment_rollout"], before)
+        self.assertEqual(self.client.calls, calls)
+
+
+class VoidTests(unittest.TestCase):
+    """A spoiled run can be ended without a result, but only by a person."""
+
+    def setUp(self):
+        from tests.test_core import FakeFlagsmith
+
+        self.folder = tempfile.TemporaryDirectory()
+        self.ledger = decisions.Ledger(Path(self.folder.name))
+        self.human = FakeFlagsmith()
+
+    def tearDown(self):
+        self.folder.cleanup()
+
+    def broken(self):
+        # The variant cannot be completed: no signups at all, many errors.
+        return scorecard.judge(
+            h.experiment(), h.results({"control": (1200, 260), "three_fields": (1200, 0)},
+                                      errors={"control": (1200, 12), "three_fields": (1200, 350)}),
+            h.exposures(), spec.parse(h.PLAN), now=h.NOW,
+        )
+
+    def test_broken_variant_is_investigate_with_the_next_steps(self):
+        card = self.broken()
+        self.assertEqual(card["verdict"]["call"], "investigate")
+        text = " ".join(card["verdict"]["reasons"])
+        self.assertIn("points at the version itself failing", text)
+        self.assertIn("referee preview 7 three_fields", text)
+        self.assertEqual(card["metrics"][0]["arms"]["three_fields"]["state"], "not computed")
+        shown = report.scorecard_text(card)
+        self.assertTrue(shown.splitlines()[1].strip().startswith("Call: INVESTIGATE"))
+        self.assertNotIn("0.0%*", shown)
+
+    def test_a_rollout_cannot_be_proposed_but_a_void_can(self):
+        with self.assertRaises(decisions.DecisionError) as caught:
+            self.ledger.propose(self.broken(), "env")
+        self.assertIn("void", str(caught.exception))
+        decision = self.ledger.propose(self.broken(), "env", void_reason="three-field form could not be submitted")
+        self.assertEqual((decision["action"], decision["status"], decision["variant_id"]), ("void", "pending", None))
+        self.assertIn("could not be submitted", decision["reasons"][0])
+        self.assertIsNone(self.human.completed)
+
+    def test_void_needs_a_reason_and_an_untrustworthy_run(self):
+        with self.assertRaises(decisions.DecisionError):
+            self.ledger.propose(self.broken(), "env", void_reason="  ")
+        with self.assertRaises(decisions.DecisionError) as caught:
+            self.ledger.propose(winning_card(), "env", void_reason="I would rather not wait")
+        self.assertIn("only be ended without a result when the call is 'investigate'", str(caught.exception))
+
+    def test_approved_void_completes_with_control_and_names_the_person(self):
+        decision = self.ledger.propose(self.broken(), "env", void_reason="variant broken")
+        applied = self.ledger.approve(decision["id"], self.human, lambda _id: self.broken())
+        self.assertEqual(self.human.completed, (7, "control", None))
+        self.assertEqual(applied["approval"]["by"], "human@example.com")
+
+    def test_void_is_refused_once_the_run_is_healthy_again(self):
+        decision = self.ledger.propose(self.broken(), "env", void_reason="variant broken")
+        with self.assertRaises(decisions.DecisionError):
+            self.ledger.approve(decision["id"], self.human, lambda _id: winning_card())
+        self.assertIsNone(self.human.completed)
+
+    def test_agent_key_cannot_approve_a_void(self):
+        decision = self.ledger.propose(self.broken(), "env", void_reason="variant broken")
+        self.human.user = None
+        with self.assertRaises(decisions.DecisionError):
+            self.ledger.approve(decision["id"], self.human, lambda _id: self.broken())
+        self.assertIsNone(self.human.completed)

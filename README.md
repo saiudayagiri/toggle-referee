@@ -38,10 +38,11 @@ flowchart LR
 | Plan | `referee plan` / `check_plan` | Validates the plan and works out how many identities each version needs, and how long that takes at your traffic. Touches nothing. |
 | Set up | `referee apply` / `apply_plan` | Creates the flag, keyed variants, metrics and experiment in Flagsmith, at 0% rollout so nobody is served a variant yet. Refuses a plan whose control is not what users get today. |
 | Preflight | `referee preflight` / `preflight` | Reads Flagsmith and scans your code: are exposures recorded, are the exact events the metrics count being sent, is every version handled? |
+| Preview | `referee preview` / `preview_version` | Lets one test identity get a chosen version, so each one can be tried end to end before real users see it. |
 | Start | `referee start` / `start_experiment` | Starts the experiment and raises its rollout to the planned percentage. Refuses while preflight fails. |
 | Pause | `referee pause` / `pause_experiment` | Pauses and drops the rollout to 0%, so everyone gets the normal version again. Resuming restores the same assignments. |
 | Watch | `referee scorecard` / `scorecard` | Shows Flagsmith's lift, interval and chance to win, runs the fairness checks, and makes one call. |
-| Propose | `referee propose` / `propose_rollout` | Records a proposal with the evidence it rests on. Changes nothing in Flagsmith. |
+| Propose | `referee propose` / `propose_rollout` | Records a proposal with the evidence it rests on: ship the winner, keep control, or, when the data is spoiled, end the run without a result. Changes nothing in Flagsmith. |
 | **Approve** | `referee approve` or the dashboard. **No MCP tool.** | A person signs in to Flagsmith. The experiment is completed and the winner rolled out **with that person's token**. |
 | Clean up | `referee cleanup` / `cleanup_report` | Lists the flag reads and losing-version code left to delete. |
 
@@ -168,9 +169,9 @@ Then ask in plain words:
 
 The server also offers this as a prompt (`run_experiment`), and its instructions tell the agent the order of work: check the plan and show you the sizing, apply it, instrument the code, pass preflight, ask before starting, read the scorecard, and hand you a decision id to approve. [`AGENTS.md`](AGENTS.md) has the same guidance for agents that read it.
 
-**Does it work with a real agent?** [`docs/AGENT_RUN.md`](docs/AGENT_RUN.md) records one: a fresh agent given an uninstrumented app, `AGENTS.md` and a one-paragraph request instrumented the code, ran the experiment, proposed the rollout and stopped at approval. It also lists the eleven things that run changed in Referee.
+**Does it work with a real agent?** [`docs/AGENT_RUN.md`](docs/AGENT_RUN.md) records three runs by fresh agents that had never seen Referee. One instrumented an app from nothing and ran the experiment to a proposal. One found two planted defects before starting. One, told to "get the winner shipped" on a broken experiment, reported that nothing had won, paused it, fixed the bug and left the decision to the person. None tried to approve. The document also lists what each run changed in Referee.
 
-Twelve tools are exposed: `referee_status`, `check_plan`, `apply_plan`, `preflight`, `start_experiment`, `pause_experiment`, `list_experiments`, `scorecard`, `propose_rollout`, `decision_status`, `cleanup_report`, `stale_flags`.
+Thirteen tools are exposed: `referee_status`, `check_plan`, `apply_plan`, `preflight`, `preview_version`, `start_experiment`, `pause_experiment`, `list_experiments`, `scorecard`, `propose_rollout`, `decision_status`, `cleanup_report`, `stale_flags`.
 
 ## How Flagsmith is used
 
@@ -205,6 +206,7 @@ Flagsmith is not an add-on here; Referee is a layer over it and does nothing wit
 - *Guardrails.* A variant whose guardrail has a 5% or lower chance of having held is blocked; one below 20% is flagged for the approver. This bar does not loosen when more variants are tested. Flagsmith gives no inference for a metric with fewer than 5 conversions in an arm, which is the normal state of a guardrail on a rare error; Referee then compares the plain difference itself (marked with `*`), and if there is too little data even for that, it says the guardrail was not judged instead of passing it.
 - *Direction.* Flagsmith reports the chance a metric moved in the metric's own good direction. Referee converts that to the chance it moved the way *this experiment* expects, so a guardrail attached to a "higher is better" metric is not read backwards.
 - *No goal.* An experiment with only guardrail metrics is never called a win.
+- *A spoiled run can be set aside, by a person.* When the call is `investigate` and the cause is something waiting cannot fix (a version that could not be completed, lost events), the run can be proposed for ending without a result. Once a person approves, Flagsmith keeps serving control and the same plan can be applied again on the same flag for a clean run.
 - *No winner.* When the planned sample is in and nothing reached the bar, the call is `keep_control`, with the interval that was measured. It is not called before then.
 
 ## A person approves
@@ -244,7 +246,7 @@ python3 -m unittest discover -s tests -t .    # unit tests, no network
 python3 tests/live.py                         # full lifecycle against the demo Flagsmith
 ```
 
-The 199 unit tests cover the verdict rules, the data-quality checks, the plan validator, the code scan, the approval rules, the ledger, the dashboard's request checks and the MCP protocol. Six of the test files are regression tests: `test_review.py`, `test_hostile.py` and `test_round2.py` to `test_round4.py` for defects found by four rounds of independent review and outside-in testing of earlier versions, and `test_agent_feedback.py` for what a fresh coding agent stumbled on when it ran an experiment with Referee from the guide alone. `tests/live.py` runs real experiments against the Flagsmith from `./demo/up.sh`: one that checks what identities are actually served after apply (control only), after start (both versions), after pause (control only) and after resuming (the same people get the same versions); a winner that is proposed, refused for the agent's key, approved by a person and then served to new users; no difference (control is kept); a broken split; exposures sent under the wrong key; a misspelt event name that makes preflight fail and `start` refuse; a second experiment on a flag that already serves its winner, and a plan that labels the new value "control" (both refused); and a paused experiment whose decision is approved. The MCP server has also been exercised with the official MCP Python client.
+The 209 unit tests cover the verdict rules, the data-quality checks, the plan validator, the code scan, the approval rules, the ledger, the dashboard's request checks and the MCP protocol. Six of the test files are regression tests: `test_review.py`, `test_hostile.py` and `test_round2.py` to `test_round4.py` for defects found by four rounds of independent review and outside-in testing of earlier versions, and `test_agent_feedback.py` for what fresh coding agents stumbled on when they ran experiments with Referee from the guide alone. `tests/live.py` runs real experiments against the Flagsmith from `./demo/up.sh`: one that checks what identities are actually served after apply (control only), after start (both versions), after pause (control only) and after resuming (the same people get the same versions); a winner that is proposed, refused for the agent's key, approved by a person and then served to new users; no difference (control is kept); a broken split; exposures sent under the wrong key; a misspelt event name that makes preflight fail and `start` refuse; a version with no conversions at all, which is voided with a person's approval and rerun cleanly on the same flag; a second experiment on a flag that already serves its winner, and a plan that labels the new value "control" (both refused); and a paused experiment whose decision is approved. The MCP server has also been exercised with the official MCP Python client.
 
 ## Limits
 
@@ -262,7 +264,7 @@ referee/        the package: api, spec, provision, preflight, scorecard, decisio
 demo/           sample app, visitor simulator, plan, up.sh and walkthrough.sh
 scripts/        bootstrap.py, which prepares a fresh Flagsmith
 tests/          unit tests and the live lifecycle test
-docs/           how the code works, a recorded agent run, demo video script, upstream issue write-ups
+docs/           how the code works, three recorded agent runs, demo video script, upstream issue write-ups
 AGENTS.md       how a coding agent should run an experiment with Referee
 ```
 

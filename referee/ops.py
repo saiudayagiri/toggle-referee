@@ -313,7 +313,10 @@ def pause(settings: Settings, experiment: Any) -> Dict[str, Any]:
         # Not running, but it may still be serving its split (Flagsmith serves
         # a rollout in any status), so the rollout is still brought to 0%.
         paused = detail
-    out = {"id": paused["id"], "name": paused["name"], "status": paused["status"], "serving": True}
+    out = {
+        "id": paused["id"], "name": paused["name"], "status": paused["status"], "serving": True,
+        "control_value": ((detail.get("experiment_rollout") or {}).get("feature_state_value") or {}).get("value"),
+    }
     if live_rollout(detail) <= 0:
         out["serving"] = False
         return out
@@ -337,6 +340,72 @@ def pause(settings: Settings, experiment: Any) -> Dict[str, Any]:
         out["serving"] = False
     except FlagsmithError as error:
         out["warning"] = "The split is still being served: the rollout could not be set to 0%% (%s)." % error
+    return out
+
+
+PREVIEW_PREFIX = "referee-preview"
+
+
+def preview(
+    settings: Settings, experiment: Any, version: str = "", identity: str = "", clear: bool = False
+) -> Dict[str, Any]:
+    """Let one test identity see a chosen version, before or during the experiment.
+
+    Uses a Flagsmith identity override, which applies to that identity alone.
+    Only identities whose name starts with ``referee-preview`` can be used, so
+    this can never be pointed at a real user. A preview identity is outside
+    the experiment and does not enter its results.
+    """
+    client = _client(settings)
+    experiment_id = resolve_experiment(client, experiment)
+    detail = client.experiment(experiment_id)
+    feature = detail.get("feature") or {}
+    options = feature.get("multivariate_options") or []
+    identity = (identity or PREVIEW_PREFIX).strip()
+    if not identity.startswith(PREVIEW_PREFIX) or len(identity) > 100 or not all(c.isalnum() or c in "-_." for c in identity):
+        raise OpError(
+            "A preview identity must be named '%s' or start with it (letters, digits, '-', '_', '.'), "
+            "so that a preview can never override what a real user gets." % PREVIEW_PREFIX
+        )
+    control_value = ((detail.get("experiment_rollout") or {}).get("feature_state_value") or {}).get("value")
+    if control_value is None:
+        control_value = feature.get("initial_value", "")
+    out: Dict[str, Any] = {
+        "experiment": {"id": detail["id"], "name": detail["name"], "flag": feature.get("name")},
+        "identity": identity,
+    }
+    try:
+        if clear:
+            identity_id = client.identity_id(identity)
+            removed = 0
+            if identity_id is not None:
+                for override in client.identity_overrides(identity_id, feature["id"]):
+                    client.delete_identity_override(identity_id, override["id"])
+                    removed += 1
+            out.update(cleared=True, removed=removed)
+            return out
+        keys = ["control"] + [o["key"] for o in options if o.get("key")]
+        if version not in keys:
+            raise OpError("Choose a version to preview: %s." % ", ".join(keys))
+        shares = {o["id"]: (100.0 if o.get("key") == version else 0.0) for o in options}
+        identity_id = client.identity_id(identity, create=True)
+        client.set_identity_override(identity_id, feature["id"], str(control_value), shares)
+        served = next(
+            (f for f in client.identity_flags(identity).get("flags", []) if (f.get("feature") or {}).get("name") == feature.get("name")),
+            {},
+        )
+    except FlagsmithError as error:
+        raise OpError("Flagsmith would not set the preview: %s" % error)
+    out.update(
+        cleared=False,
+        version=version,
+        serves=served.get("feature_state_value"),
+        how=(
+            "Use the application as the identity '%s' (however this app identifies a user: a user id, or the "
+            "value of its visitor cookie) and it will get '%s'. Nobody else is affected. Run the same command "
+            "with --clear when you are done." % (identity, served.get("feature_state_value"))
+        ),
+    )
     return out
 
 
@@ -373,14 +442,22 @@ def get_scorecard(settings: Settings, experiment: Any, refresh: bool = True) -> 
 
 
 def propose(
-    settings: Settings, experiment: Any, proposed_by: str = "agent", note: str = "", valid_hours: Optional[float] = None
+    settings: Settings,
+    experiment: Any,
+    proposed_by: str = "agent",
+    note: str = "",
+    valid_hours: Optional[float] = None,
+    void_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Record a rollout proposal for a person to approve. Changes nothing in Flagsmith."""
     card = get_scorecard(settings, experiment)
     card.pop("pending_decision", None)
     ledger = decisions.Ledger(settings.state_dir)
     try:
-        decision = ledger.propose(card, settings.environment_key, proposed_by=proposed_by, note=note, valid_hours=valid_hours)
+        decision = ledger.propose(
+            card, settings.environment_key, proposed_by=proposed_by, note=note, valid_hours=valid_hours,
+            void_reason=void_reason,
+        )
     except decisions.DecisionError as error:
         raise OpError(str(error))
     return decision

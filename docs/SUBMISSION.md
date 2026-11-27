@@ -41,7 +41,7 @@ A/B tests rarely fail loudly. A variant without a key records no exposures. A me
 
 **What the agent decides and where it stops**
 
-It decides the plan, the sizing, the instrumentation and when the checks pass. It stops in three places: it asks before starting, it is refused if an experiment would expose more than half of all users, and it can only propose a rollout. Referee refuses a proposal unless the call is `ship_variant` or `keep_control`, and refuses an approval if the live data no longer supports the proposal.
+It decides the plan, the sizing, the instrumentation and when the checks pass, and it may pause an experiment that is harming users. It stops in three places: it asks before starting, it is refused if an experiment would expose more than half of all users, and it can only propose a rollout. Referee refuses a proposal unless the call is `ship_variant` or `keep_control`, and refuses an approval if the live data no longer supports the proposal.
 
 **What I learned about Flagsmith while building it**
 
@@ -49,7 +49,7 @@ Four things worth the team's attention, written up with reproduction steps in `d
 
 **How it was tested**
 
-199 unit tests on Python 3.9, 3.11 and 3.13 in CI; a live suite that runs real experiments against Flagsmith and samples what identities are actually served after each step; the official MCP client; four rounds of independent review whose findings each have a regression test; and a fresh coding agent that ran a whole experiment from the guide alone and stopped at approval (`docs/AGENT_RUN.md`).
+209 unit tests on Python 3.9, 3.11 and 3.13 in CI; a live suite that runs real experiments against Flagsmith and samples what identities are actually served after each step; the official MCP client; four rounds of independent review whose findings each have a regression test; and three runs by fresh coding agents working from the guide alone (`docs/AGENT_RUN.md`): one ran a whole experiment and stopped at approval, one found two planted defects before starting, and one, told to ship a winner from a broken experiment, reported that there was none.
 
 **Built with**
 

@@ -37,7 +37,7 @@ def _signed(value: Optional[float]) -> str:
 def _chance(numbers: Dict[str, Any]) -> str:
     """The chance the metric moved the way the experiment wants, for one arm."""
     chance = numbers.get("chance_good")
-    if chance is None:
+    if chance is None or numbers.get("state") == "not computed":
         return "-"
     # A star marks Referee's own comparison, used where Flagsmith has no inference.
     return _pct(chance) + ("*" if numbers.get("chance_source") == "difference" else "")
@@ -85,12 +85,14 @@ def plan_text(plan: Plan) -> str:
     lines.append("Sizing")
     a = plan.assumptions
     if sizing.get("per_arm"):
+        falling = plan.primary.goal == "decrease"
+        target = a.baseline_rate * (1 - a.minimum_lift if falling else 1 + a.minimum_lift)
         lines.append(
-            "  Assuming a baseline of %s and caring about a %s of %s or more:"
+            "  Assuming a baseline of %s and caring about a relative %s of %s or more (%s becoming %s):"
             % (
-                _pct(a.baseline_rate),
-                "fall" if plan.primary.goal == "decrease" else "lift",
-                _pct(a.minimum_lift) if plan.primary.goal == "decrease" else _signed(a.minimum_lift),
+                _pct(a.baseline_rate), "fall" if falling else "lift",
+                _pct(a.minimum_lift) if falling else _signed(a.minimum_lift),
+                _pct(a.baseline_rate), _pct(target),
             )
         )
         lines.append(
@@ -170,9 +172,17 @@ def scorecard_text(card: Dict[str, Any]) -> str:
     lines = [
         "Scorecard: %s (experiment %s, flag '%s', %s)"
         % (experiment["name"], experiment["id"], experiment["flag"], experiment["status"]),
+        # The call comes first; the numbers and the reasons for it follow.
+        "  Call: %s. %s" % (CALL_LABELS.get(verdict["call"], verdict["call"]), verdict["headline"]),
     ]
     if experiment.get("hypothesis"):
         lines.append("  Hypothesis: %s" % experiment["hypothesis"])
+    hours = card["progress"].get("hours_running")
+    if experiment.get("started_at") and hours is not None:
+        lines.append(
+            "  Started %s (%s %s)"
+            % (experiment["started_at"], sc.duration(hours), "in total" if experiment["status"] == "completed" else "ago")
+        )
     freshness = card["freshness"]
     if freshness.get("as_of"):
         age = freshness.get("age_minutes")
@@ -230,7 +240,7 @@ def scorecard_text(card: Dict[str, Any]) -> str:
                     ]
                 )
         lines += _table(["version", "value", "lift", "95% interval", _chance_title(metric), "state"], rows)
-        if any(a.get("chance_source") == "difference" for a in metric["arms"].values()):
+        if any(a.get("chance_source") == "difference" and a.get("state") != "not computed" for a in metric["arms"].values()):
             lines.append("  * Flagsmith has too little data for its own inference here; this is Referee's comparison of the plain difference.")
         lines.append("")
 

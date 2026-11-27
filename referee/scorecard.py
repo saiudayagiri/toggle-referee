@@ -346,6 +346,11 @@ def judge(
                 # Only Flagsmith's own inference can make a metric "winning"
                 # or "losing"; the fallback is used for guardrails alone.
                 entry["state"] = _state(chance if source == "flagsmith" else None, threshold, harm_threshold)
+                if source != "flagsmith" and goal in ("increase", "decrease") and n >= stats.MIN_IDENTITIES_PER_VARIANT:
+                    # Plenty of identities, yet Flagsmith gives no inference
+                    # (usually too few conversions in an arm). "collecting"
+                    # would suggest that waiting helps.
+                    entry["state"] = "not computed"
                 if goal in ("not_increase", "not_decrease") and chance is not None:
                     # A guardrail is never "winning"; what matters is whether it held.
                     entry["state"] = (
@@ -580,9 +585,11 @@ def _verdict(
 
     def result(call: str, headline: str, variant: Optional[Dict[str, Any]] = None, actionable: bool = False) -> Dict[str, Any]:
         if actionable and 0 < (progress.get("days_of_data") or 0) <= 1:
+            hours = progress.get("hours_running")
             reasons.append(
-                "All of this data arrived within a single day, so it has not seen a full daily or weekly cycle. "
+                "All of this data arrived within %s, so it has not seen a full daily or weekly cycle. "
                 "If behaviour differs by time of day or day of week, that is not in these numbers."
+                % ("a single day" if hours is None or hours >= 24 else "a single day (the experiment started %s ago)" % duration(hours))
             )
         return {
             "call": call,
@@ -635,6 +642,7 @@ def _verdict(
         return metric["arms"].get(treatment["key"]) or {}
 
     states = {t["key"]: entry_of(primary, t).get("state", "collecting") for t in treatments}
+    states = {key: ("collecting" if state == "not computed" else state) for key, state in states.items()}
     if not treatments or all(state == "collecting" for state in states.values()):
         in_test = [a for a in arms if a["in_experiment"]]
         enough_people = bool(in_test) and all(
@@ -648,10 +656,30 @@ def _verdict(
                 # One version converts and another records nothing at all.
                 # Waiting will not fix that; the tracking in that version is broken.
                 reasons.append(
-                    "%s recorded no '%s' events at all, while another version recorded %d. That is almost "
-                    "certainly broken tracking in that version's code path, not a real difference, and it "
-                    "will not resolve by waiting."
+                    "%s recorded no '%s' events at all, while another version recorded %d. A real difference "
+                    "is never that complete. Either the event is not sent on that version's code path, or that "
+                    "version cannot be completed at all. Waiting will not resolve it."
                     % (" and ".join("'%s'" % key for key in silent), primary["name"], busiest)
+                )
+                for guardrail in guardrails:
+                    for key in silent:
+                        entry = guardrail["arms"].get(key) or {}
+                        chance = entry.get("chance_good")
+                        if chance is not None and chance <= harm_threshold:
+                            reasons.append(
+                                "Guardrail '%s' is far worse for '%s' (%s against %s for control), which points at "
+                                "the version itself failing for users, not just at the tracking."
+                                % (
+                                    guardrail["name"], key, _value(guardrail, entry),
+                                    _value(guardrail, guardrail["arms"].get(CONTROL_KEY) or {}),
+                                )
+                            )
+                reasons.append(
+                    "Next: pause the experiment if users are being harmed, then try that version by hand "
+                    "(`referee preview %s %s`). The data collected so far cannot be repaired; once the cause is "
+                    "fixed, this run can be ended without a result (`referee propose %s --void --reason ...`, "
+                    "approved by a person) and the plan applied again for a clean one."
+                    % (experiment.get("id"), silent[0], experiment.get("id"))
                 )
                 return result("investigate", "Do not call this yet: one version records no conversions.")
             reasons.append(
@@ -745,7 +773,10 @@ def _verdict(
             )
         judged = [g for g in guardrails if g["name"] not in unjudged.get(best["key"], [])]
         if judged:
-            reasons.append("No guardrail metric got reliably worse for '%s'." % best["key"])
+            reasons.append(
+                "No guardrail metric got reliably worse for '%s' (a guardrail blocks a variant at a %s or "
+                "lower chance that it held)." % (best["key"], _percent(harm_threshold))
+            )
             for guardrail in judged:
                 entry = entry_of(guardrail, best)
                 chance = entry.get("chance_good")

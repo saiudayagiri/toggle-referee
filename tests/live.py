@@ -230,6 +230,33 @@ def main():
         check("call is investigate", card["verdict"]["call"] == "investigate", card["verdict"]["call"])
         ops.pause(settings, experiment_id)
 
+        print("spoiled")
+        data = plan("spoiled")
+        experiment_id = set_up(settings, data)
+        send(client, data["flag"], data["metrics"][0]["event"], {"control": (400, 90), "new": (400, 0)})
+        card = scorecard(settings, experiment_id)
+        check("a version with no conversions at all is investigate", card["verdict"]["call"] == "investigate", card["verdict"])
+        try:
+            ops.propose(settings, experiment_id)
+            check("a rollout cannot be proposed from it", False)
+        except ops.OpError:
+            check("a rollout cannot be proposed from it", True)
+        ops.pause(settings, experiment_id)
+        decision = ops.propose(settings, experiment_id, proposed_by="live test", void_reason="variant could not convert")
+        check("ending it without a result can be proposed", decision["action"] == "void" and decision["status"] == "pending")
+        applied = ops.approve(settings, decision["id"], approver_token)
+        finished = client.experiment(experiment_id)
+        check("a person's approval ends it with control", finished["status"] == "completed" and finished["rollout_decision"] == "control")
+        rerun = ops.apply_plan(settings, data)
+        check("the same plan can be applied again on the same flag", rerun["experiment_id"] not in (None, experiment_id), rerun)
+        ops.start(settings, rerun["experiment_id"])
+        time.sleep(1.5)
+        send(client, data["flag"], data["metrics"][0]["event"],
+             {"control": (needed + 20, int(needed * 0.2)), "new": (needed + 10, int(needed * 0.3))})
+        card = scorecard(settings, rerun["experiment_id"])
+        check("the rerun is judged on its own data only", card["verdict"]["call"] == "ship_variant", card["verdict"])
+        ops.pause(settings, rerun["experiment_id"])
+
         print("misspelt")
         data = plan("misspelt")
         applied = ops.apply_plan(settings, data)
@@ -292,7 +319,7 @@ def main():
         check("ledger intact", verified["ok"], verified)
         check(
             "ledger records every proposal, the refused approval and every approval",
-            events.count("proposed") == 3 and events.count("approval_refused") == 1 and events.count("approved_and_applied") == 3,
+            events.count("proposed") == 4 and events.count("approval_refused") == 1 and events.count("approved_and_applied") == 4,
             events,
         )
 

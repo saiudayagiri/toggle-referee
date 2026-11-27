@@ -124,6 +124,17 @@ def _apply(client: Flagsmith, plan: Plan, out: Provisioned) -> Provisioned:
             if problem:
                 raise ProvisionError(problem)
 
+    same_name = [
+        e for e in client.experiments(ACTIVE)
+        if e.get("name") == plan.name and (feature is None or _feature_id(e) != feature["id"])
+    ]
+    if same_name:
+        say(
+            "Note: another experiment that is not completed is also called '%s' (id %s, flag %s). Flagsmith "
+            "allows that, but refer to this one by its id or flag name to avoid mixing them up."
+            % (plan.name, same_name[0]["id"], (same_name[0].get("feature") or {}).get("name"))
+        )
+
     # 2. Somewhere for events to go.
     connections = client.warehouse_connections()
     if not connections:
@@ -216,7 +227,11 @@ def _apply(client: Flagsmith, plan: Plan, out: Provisioned) -> Provisioned:
             shared = len(match.get("experiments") or [])
             say(
                 "Metric '%s' already exists with the same event ('%s'), aggregation and direction; reusing it%s."
-                % (match["name"], metric.event, " (%d other experiment(s) use it too)" % shared if shared else "")
+                % (
+                    match["name"], metric.event,
+                    " (%d other experiment(s) use it too, which is fine: an event only counts for an experiment "
+                    "when it comes from an identity that experiment exposed)" % shared if shared else "",
+                )
             )
         elif dry_run:
             say("Would create metric '%s' counting the event '%s' (%s)." % (metric.name, metric.event, metric.aggregation))

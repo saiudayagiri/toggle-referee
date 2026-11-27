@@ -327,6 +327,40 @@ def run(
                 "(Flagsmith's list of event names can lag by up to five minutes).",
             )
 
+    # ------------------------------------------- what the data already says
+    if status in ("running", "paused"):
+        # Preflight checks the set-up. If the experiment's own data already
+        # shows a problem, "ready" on its own would mislead.
+        try:
+            card = scorecard.judge(experiment, client.results(experiment_id), client.exposures(experiment_id), plan)
+        except (FlagsmithError, AttributeError, KeyError, TypeError):
+            card = None
+        if card is not None and card["verdict"]["call"] == "investigate":
+            add(
+                "data", "fail", "The experiment's data already shows a problem",
+                "The scorecard's call is INVESTIGATE: %s %s"
+                % (card["verdict"]["headline"], " ".join(card["verdict"]["reasons"][:1])),
+                "Run `referee scorecard %s` for the details." % experiment_id,
+            )
+
+    # ------------------------------------------------------- events arriving
+    if status == "running" and connections:
+        received = connections[0].get("total_events_received")
+        last = connections[0].get("last_event_received_at")
+        if received:
+            add(
+                "events_arriving", "info", "Flagsmith is receiving events",
+                "%d received in this environment so far, the latest at %s. This figure updates within a minute "
+                "and does not use up the scorecard's five-minute refresh, so it is the quick way to see "
+                "whether events are flowing." % (received, last),
+            )
+        elif received == 0:
+            add(
+                "events_arriving", "warn", "Flagsmith has received no events in this environment yet",
+                "Normal in the first moments after a start. If visitors have already come and this stays at "
+                "zero, the SDK is not sending: check enable_events and the events URL.",
+            )
+
     # ----------------------------------------------------------- live probe
     if probe > 0 and status in ("running",):
         add(*_probe(client, flag, probe, rollout, options))
@@ -368,7 +402,10 @@ def run(
         add(
             "overlap", "info", "Other experiments are running in this environment",
             "%s. Flagsmith assigns each experiment independently, so they do not bias each other, "
-            "but they share the same users." % ", ".join("'%s'" % e["name"] for e in others[:5]),
+            "but they share the same users."
+            % ", ".join(
+                "'%s' (id %s, flag %s)" % (e["name"], e["id"], (e.get("feature") or {}).get("name")) for e in others[:5]
+            ),
         )
 
     failed = [c for c in checks if c["status"] == "fail"]
@@ -449,6 +486,14 @@ def _probe(client: Flagsmith, flag: str, count: int, rollout: Dict[str, Any], op
         )
     return (
         "probe", "pass", "Flagsmith assigns versions as configured",
-        "%d probe identities: %d in the experiment (%s), %d outside. No exposure was recorded for them."
-        % (count, inside, summary, outside),
+        "%d probe identities: %d in the experiment (%s), %d outside%s. No exposure was recorded for them."
+        % (
+            count, inside, summary, outside,
+            (
+                "; that fits the configured shares (p = %.2f)" % p_value
+                if p_value >= 0.05
+                else "; that is uneven, though still within what chance allows at this size (p = %.3f; the check "
+                "fails below %g). Probe more identities if you want to be sure" % (p_value, stats.SRM_ALARM)
+            ) if p_value is not None else "",
+        ),
     )

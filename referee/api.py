@@ -462,6 +462,50 @@ class Flagsmith:
             headers={"X-Environment-Key": self.environment_key},
         )
 
+    # --------------------------------------------------- identity overrides
+
+    def identity_id(self, identifier: str, create: bool = False) -> Optional[int]:
+        """Flagsmith's id for an identity, optionally creating it."""
+        data = self.request("GET", self._env("identities/"), query={"q": '"%s"' % identifier, "page_size": 20})
+        for row in (data or {}).get("results") or []:
+            if row.get("identifier") == identifier:
+                return row["id"]
+        if not create:
+            return None
+        return self.request("POST", self._env("identities/"), {"identifier": identifier})["id"]
+
+    def identity_overrides(self, identity_id: int, feature_id: int) -> List[Dict[str, Any]]:
+        rows = self._all_pages(self._env("identities/%d/featurestates/" % identity_id))
+        out = []
+        for row in rows:
+            feature = row.get("feature")
+            if (feature.get("id") if isinstance(feature, dict) else feature) == feature_id:
+                out.append(row)
+        return out
+
+    def set_identity_override(
+        self, identity_id: int, feature_id: int, value: str, variant_shares: Dict[int, float]
+    ) -> Dict[str, Any]:
+        """Make one identity get a fixed version of a flag, whatever else applies."""
+        for existing in self.identity_overrides(identity_id, feature_id):
+            self.delete_identity_override(identity_id, existing["id"])
+        return self.request(
+            "POST",
+            self._env("identities/%d/featurestates/" % identity_id),
+            {
+                "feature": feature_id,
+                "enabled": True,
+                "feature_state_value": value,
+                "multivariate_feature_state_values": [
+                    {"multivariate_feature_option": option, "percentage_allocation": share}
+                    for option, share in variant_shares.items()
+                ],
+            },
+        )
+
+    def delete_identity_override(self, identity_id: int, override_id: int) -> None:
+        self.request("DELETE", self._env("identities/%d/featurestates/%d/" % (identity_id, override_id)))
+
     def audit_log(self, search: str = "", limit: int = 20) -> List[Dict[str, Any]]:
         query: Dict[str, Any] = {"page_size": limit}
         if search:

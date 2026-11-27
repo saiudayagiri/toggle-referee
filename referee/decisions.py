@@ -167,6 +167,7 @@ class Ledger:
         proposed_by: str = "agent",
         note: str = "",
         valid_hours: Optional[float] = None,
+        void_reason: Optional[str] = None,
     ) -> Dict[str, Any]:
         verdict = card["verdict"]
         lifetime = EXPIRES_AFTER
@@ -174,11 +175,26 @@ class Ledger:
             if not 1 <= float(valid_hours) <= MAX_VALID_HOURS:
                 raise DecisionError("A proposal can stay open for between 1 and %d hours." % MAX_VALID_HOURS)
             lifetime = timedelta(hours=float(valid_hours))
-        if verdict["call"] not in ACTIONABLE or not verdict.get("actionable"):
+        void = void_reason is not None
+        if void:
+            # Ending a run without a result: for data that cannot be trusted
+            # and will not come right by waiting. It still takes a person.
+            if not str(void_reason).strip():
+                raise DecisionError("Say why the run should be ended without a result.")
+            if verdict["call"] != "investigate":
+                raise DecisionError(
+                    "A run can only be ended without a result when the call is 'investigate'. The call is '%s' "
+                    "(%s)." % (verdict["call"], verdict["headline"])
+                )
+        elif verdict["call"] not in ACTIONABLE or not verdict.get("actionable"):
             raise DecisionError(
                 "Nothing to propose: the call is '%s' (%s). A rollout can only be "
-                "proposed when the call is ship_variant or keep_control."
-                % (verdict["call"], verdict["headline"])
+                "proposed when the call is ship_variant or keep_control.%s"
+                % (
+                    verdict["call"], verdict["headline"],
+                    " If this run's data is spoiled, it can be proposed for ending without a result instead (void)."
+                    if verdict["call"] == "investigate" else "",
+                )
             )
         with self._exclusive():
             experiment = card["experiment"]
@@ -195,11 +211,13 @@ class Ledger:
                 "experiment_id": experiment["id"],
                 "experiment_name": experiment["name"],
                 "flag": experiment["flag"],
-                "action": verdict["call"],
-                "variant_key": verdict.get("variant_key"),
-                "variant_id": verdict.get("variant_id"),
-                "headline": verdict["headline"],
-                "reasons": list(verdict.get("reasons") or []),
+                "action": "void" if void else verdict["call"],
+                "variant_key": None if void else verdict.get("variant_key"),
+                "variant_id": None if void else verdict.get("variant_id"),
+                "headline": "End this run without a result and keep control." if void else verdict["headline"],
+                "reasons": (
+                    ["Reason given: %s" % str(void_reason).strip()[:MAX_NOTE]] if void else []
+                ) + list(verdict.get("reasons") or []),
                 "evidence_hash": card["evidence_hash"],
                 "scorecard": card,
                 "proposed_by": proposed_by,
@@ -272,12 +290,17 @@ class Ledger:
                         else "%.0f minutes old" % age
                     )
                 )
-            same_call = (
-                live["call"] == decision["action"]
-                and live.get("variant_key") == decision.get("variant_key")
-                # The id to ship is taken from live data, and must be the one proposed.
-                and live.get("variant_id") == decision.get("variant_id")
-            )
+            if decision["action"] == "void":
+                # Still untrustworthy on live data? If the problem has gone
+                # away, the run may be worth keeping, so a void no longer applies.
+                same_call = live["call"] == "investigate"
+            else:
+                same_call = (
+                    live["call"] == decision["action"]
+                    and live.get("variant_key") == decision.get("variant_key")
+                    # The id to ship is taken from live data, and must be the one proposed.
+                    and live.get("variant_id") == decision.get("variant_id")
+                )
             if not same_call:
                 decision["status"] = "stale"
                 decision["closed_at"] = _stamp()
@@ -287,7 +310,7 @@ class Ledger:
                 raise DecisionError(
                     "Not applied. When this was proposed the call was '%s'; on live data it "
                     "is now '%s' (%s). Ask for a new proposal."
-                    % (decision["action"], live["call"], live["headline"])
+                    % ("investigate" if decision["action"] == "void" else decision["action"], live["call"], live["headline"])
                 )
 
             if decision["action"] == "ship_variant":

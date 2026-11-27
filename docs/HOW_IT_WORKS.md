@@ -66,6 +66,8 @@ With `--probe N` on a running experiment, `_probe` asks Flagsmith's SDK endpoint
 
 `start` runs preflight, applies the agent's exposure cap when called through MCP (planned rollout times the variants' share must be at most 50% of all users), tells Flagsmith to start, and only then raises the live rollout from 0% to the planned percentage. `pause` pauses and sets the rollout back to 0%. Flagsmith assigns by hashing the identity, so resuming gives the same people the same versions.
 
+`ops.preview` uses a Flagsmith identity override so that one test identity gets a chosen version, which is how each version can be tried end to end before anyone real sees it. It only accepts identities named `referee-preview...`, and such an identity is outside the experiment.
+
 ## 5. The scorecard (`scorecard.py`)
 
 `build` fetches the experiment, its results and exposures (asking Flagsmith to recompute when the results are over a minute old) and passes them to `judge`. `judge` is a pure function, with no network, which is why most of the tests can call it directly with made-up payloads.
@@ -92,10 +94,13 @@ The scorecard carries an `evidence_hash`: a SHA-256 over the numbers and the cal
 3. the scorecard is rebuilt from Flagsmith; its results must be under ten minutes old, and the call, the variant key and the variant id must all equal what was proposed,
 4. `complete_experiment` is called **with the approver's client**, so Flagsmith's audit log names them.
 
+A proposal is normally a rollout (ship the variant, or keep control). When the call is `investigate`, `propose` also accepts a void: end the run without a result and keep control, for data that waiting cannot repair. Approval of a void checks that the call is still `investigate`, and completes the experiment with control; the same plan can then be applied again on the same flag.
+
 There is no approve function in `mcp_server.py`. `cli.cmd_approve` insists on a terminal and reads the password with `getpass`; `web.App.approve` takes it from a form that needs a per-run token and a local `Host` header.
 
 ## Where the tests are
 
 - `test_scorecard.py`, `test_core.py`, `test_preflight.py`: the behaviour described above.
-- `test_review.py`, `test_hostile.py`, `test_round2.py`, `test_round3.py`, `test_round4.py`: one test per defect found by independent review. Reading these is the fastest way to see what can go wrong with an experiment and how Referee answers it.
+- `test_review.py`, `test_hostile.py`, `test_round2.py`, `test_round3.py`, `test_round4.py`: one test per defect found by independent review.
+- `test_agent_feedback.py`: what fresh coding agents stumbled on when they ran experiments from the guide alone (see `AGENT_RUN.md`). Reading these is the fastest way to see what can go wrong with an experiment and how Referee answers it.
 - `tests/live.py`: real experiments against a running Flagsmith, including sampling what identities are actually served after each step.

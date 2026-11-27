@@ -340,6 +340,9 @@ class App:
             effect = (
                 "serve <code>%s</code> to everyone" % esc(decision["variant_key"])
                 if decision["action"] == "ship_variant"
+                else "serve the control version to everyone, with no winner recorded: this run's data is set aside, "
+                "and the same plan can be applied again for a clean run"
+                if decision["action"] == "void"
                 else "serve the control version to everyone"
             )
             body += (

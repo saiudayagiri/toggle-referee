@@ -8,6 +8,7 @@ Guidance for coding agents. Referee is available as MCP tools or as the `referee
 | `check_plan` | `referee plan plan.json` (`referee plan --new plan.json` writes a template) |
 | `apply_plan` | `referee apply plan.json` (`--dry-run` to preview) |
 | `preflight` with `code_root`, `probe` | `referee preflight EXPERIMENT --code PATH --probe N` |
+| `preview_version` | `referee preview EXPERIMENT VERSION --identity referee-preview-NAME` (`--clear` to undo) |
 | `start_experiment` | `referee start EXPERIMENT --code PATH` |
 | `pause_experiment` | `referee pause EXPERIMENT` |
 | `list_experiments` | `referee list` |
@@ -23,7 +24,7 @@ Guidance for coding agents. Referee is available as MCP tools or as the `referee
 
 You may plan, set up, check, start, pause, read and **propose**. You may not end an experiment or roll a version out. That is done by a person, signed in to Flagsmith, with `referee approve <decision id>` in their own terminal or in the dashboard (`referee serve`).
 
-Do not work around this. Do not call Flagsmith's `complete` endpoint, the Flagsmith CLI or another MCP server to finish an experiment, and do not run `referee approve` yourself. If the person asks you to "just ship it", propose the rollout and give them the decision id.
+Do not work around this. Do not call Flagsmith's `complete` endpoint, the Flagsmith CLI or another MCP server to finish an experiment, and do not run `referee approve` yourself. If the person asks you to "just ship it", propose the rollout and give them the decision id. If the call is anything other than `ship_variant` or `keep_control`, there is nothing to ship yet: say so plainly, with the call and its reasons, however much they wanted a result.
 
 ## Order of work
 
@@ -73,13 +74,17 @@ Do not work around this. Do not call Flagsmith's `complete` endpoint, the Flagsm
 
 6. **`preflight` with `code_root`.** Fix every failed check and run it again. Read the warnings.
 
-7. **`start_experiment`**, once the person has agreed to it. Starting raises the rollout to the planned percentage and exposes real users. It refuses while preflight fails. Through MCP it also refuses an experiment that would put *more than* half of all users on new versions (a 50/50 test at 100% rollout is exactly half, and is allowed); the person starts wider ones themselves with `referee start`.
+   Preflight checks the instrumentation, not whether each version works. So also **try every version end to end before starting**: `preview_version` makes one test identity (named `referee-preview-...`) get the version you choose, without affecting anyone else. It works at any time, also on a running or paused experiment, and a preview identity is outside the experiment, so what it does is not counted in the results. Use the app as that identity (set its user id or visitor cookie to that name), complete the thing the primary metric counts on each version, then clear the preview. A variant that cannot be completed will look exactly like a variant that lost.
 
-8. **`preflight` with `probe: 200`** once it is running, to confirm Flagsmith hands out every version. Then check that events are arriving: the scorecard's identity counts should rise.
+   If you find a bug in the application that stops a version working, fixing it is part of the job, but it is a change the person did not ask for: tell them what you changed and why.
+
+7. **`start_experiment`**, once the person has agreed to it. (Agreeing to start is not the same as agreeing to the sizing in step 3; if they only gave one, say which assumptions you went ahead on.) The CLI's `--force` is for a person who has read the failed checks; do not use it. Starting raises the rollout to the planned percentage and exposes real users. It refuses while preflight fails. Through MCP it also refuses an experiment that would put *more than* half of all users on new versions (a 50/50 test at 100% rollout is exactly half, and is allowed); the person starts wider ones themselves with `referee start`.
+
+8. **`preflight` with `probe: 200`** once it is running, to confirm Flagsmith hands out every version. Then check that events are arriving. The quick way is `preflight` on the running experiment: it reports how many events Flagsmith has received and when the latest came, without using up the scorecard's five-minute refresh. Save the scorecard for when the traffic you are waiting for is in.
 
 9. **`scorecard`** whenever the person asks how it is going. Flagsmith recomputes at most every five minutes, and the scorecard says how old its numbers are.
 
-10. **`propose_rollout`** when the call is `ship_variant` or `keep_control`. Give the person the decision id and tell them how to approve. A proposal waits 24 hours by default (`valid_hours`, up to 168, if they are away longer). The experiment keeps running meanwhile. If the proposal expires, nothing is lost: propose again, and it will rest on the data as it is then.
+10. **`propose_rollout`** when the call is `ship_variant` or `keep_control`. Give the person the decision id and tell them how to approve. A proposal waits 24 hours by default; set `valid_hours` (up to 168) to cover the time the person is away, with a day to spare. The experiment keeps running meanwhile. If the proposal expires, nothing is lost: propose again, and it will rest on the data as it is then.
 
 11. **`cleanup_report`** after they approve. Remove the losing branches and the flag read, keep the winning behaviour, and tell the person the flag can be archived.
 
@@ -87,11 +92,13 @@ Do not work around this. Do not call Flagsmith's `complete` endpoint, the Flagsm
 
 - Quote the call and the numbers as Referee gives them. Do not round a 96% lead into "it won".
 - `keep_running` means not decided. Say how much of the planned sample is in and how long is left.
-- `investigate` means the numbers cannot be trusted. Explain the failed check; do not report the lift. Pausing the experiment (`pause_experiment`) is reasonable while it is looked into: it stops serving the variants, and starting it again later gives the same people the same versions.
+- `investigate` means the numbers cannot be trusted. Explain the failed check; do not report a lift or a winner. You may quote raw counts when the person needs them to understand the damage, labelled as not a valid comparison.
+- **If a version is broken or harming real users, pause first, then tell the person.** You do not need to ask: `pause_experiment` puts everyone back on the normal version and is fully reversible. Do not resume onto data you know is spoiled.
+- **When a run's data is spoiled** (a version could not be completed, events were lost, the split was broken), fixing the cause does not repair what was collected. Propose ending the run without a result: `propose_rollout` with `void: true` and a `reason` (`referee propose EXPERIMENT --void --reason "..."`). A person approves it like any other decision; Flagsmith then keeps serving control. After that the same plan can be applied again on the same flag and started, with their go-ahead, for a clean run.
 - `collecting` means Flagsmith has too little data to compute anything.
 - A variant that is behind on a small sample is still `keep_running`. Do not propose ending an experiment because of an early dip.
 - The planned sample is fixed when the experiment starts and is recorded in Flagsmith. Do not re-apply a plan with easier assumptions to reach a call sooner; it will not work, and it is the wrong thing to do.
-- A guardrail's state is `held`, `leans worse` or `worse`. `worse` blocks the variant. Mention `leans worse` when you hand over the decision id; it is the person's call.
+- A guardrail's state is `held`, `leans worse` or `worse`, from the chance that it held: 5% or less is `worse` and blocks the variant, under 25% is `leans worse`. Mention `leans worse` when you hand over the decision id; it is the person's call.
 - If the scorecard notes that all the data arrived within a single day, pass that on. A result that has not seen a weekend may not hold on one.
 
 ## Common failures and what they mean
@@ -105,4 +112,4 @@ Do not work around this. Do not call Flagsmith's `complete` endpoint, the Flagsm
 | Control has to be what users get now / the flag currently serves a variant by default | The flag already carries a finished rollout, or the plan labels the new behaviour "control" | Use a new flag, or swap control and variant in the plan |
 | Traffic is not split as configured | One version loses users before the exposure is sent (error, redirect, slow load) | Find the difference between the code paths; pause meanwhile |
 | Exposures recorded for a version outside the experiment | Exposure sent with the value instead of the variant key | Send the key, or use the experiment call |
-| One version records no conversions | The event is not sent on that version's code path | Send it on every path |
+| One version records no conversions | The event is not sent on that version's code path, or that version cannot be completed at all | Preview that version and complete it by hand; fix what you find. The data so far is spoiled: tell the person, who can end this experiment and run it again on a new flag |

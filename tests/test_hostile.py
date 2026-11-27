@@ -92,7 +92,10 @@ class StuckCollectingTests(unittest.TestCase):
             spec.parse(h.PLAN), now=h.NOW,
         )
         self.assertEqual(card["verdict"]["call"], "investigate")
-        self.assertIn("broken tracking", " ".join(card["verdict"]["reasons"]))
+        text = " ".join(card["verdict"]["reasons"])
+        self.assertIn("cannot be completed at all", text)
+        self.assertIn("referee preview 7 control", text)
+        self.assertIn("--void", text)
 
     def test_few_conversions_everywhere_says_which_floor_is_missing(self):
         card = scorecard.judge(

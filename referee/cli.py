@@ -161,6 +161,19 @@ def cmd_start(args: argparse.Namespace, settings: config.Settings) -> int:
     return 0
 
 
+def cmd_preview(args: argparse.Namespace, settings: config.Settings) -> int:
+    result = ops.preview(settings, args.experiment, args.version or "", args.identity, clear=args.clear)
+    if args.json:
+        _print_json(result)
+        return 0
+    if result["cleared"]:
+        print("Preview cleared for '%s' (%d override(s) removed); it gets what everyone gets again." % (result["identity"], result["removed"]))
+        return 0
+    print("Identity '%s' now gets '%s' from flag '%s'." % (result["identity"], result["serves"], result["experiment"]["flag"]))
+    print(result["how"])
+    return 0
+
+
 def cmd_pause(args: argparse.Namespace, settings: config.Settings) -> int:
     result = ops.pause(settings, args.experiment)
     if args.json:
@@ -168,7 +181,8 @@ def cmd_pause(args: argparse.Namespace, settings: config.Settings) -> int:
     else:
         print("'%s' is now %s%s" % (
             result["name"], result["status"],
-            "." if result.get("serving") else ", and nobody is being served a variant; everyone gets the flag's normal value.",
+            "." if result.get("serving") else ", and nobody is being served a variant; everyone gets %s."
+            % ("'%s'" % result["control_value"] if result.get("control_value") is not None else "the flag's normal value"),
         ))
         if result.get("warning"):
             print("WARNING: %s" % result["warning"])
@@ -239,7 +253,12 @@ def cmd_watch(args: argparse.Namespace, settings: config.Settings) -> int:
 
 
 def cmd_propose(args: argparse.Namespace, settings: config.Settings) -> int:
-    decision = ops.propose(settings, args.experiment, proposed_by=_one_line(args.by), note=args.note, valid_hours=args.valid_hours)
+    if args.void and not args.reason:
+        raise ops.OpError("--void needs --reason: say why this run should be ended without a result.")
+    decision = ops.propose(
+        settings, args.experiment, proposed_by=_one_line(args.by), note=args.note, valid_hours=args.valid_hours,
+        void_reason=args.reason if args.void else None,
+    )
     if args.json:
         _print_json(decisions.summary(decision))
         return 0
@@ -434,6 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
         "plan": ["check_plan"], "apply": ["apply_plan"], "start": ["start_experiment"],
         "pause": ["pause_experiment"], "list": ["list_experiments"], "propose": ["propose_rollout"],
         "cleanup": ["cleanup_report"], "stale": ["stale_flags"], "doctor": ["referee_status"],
+        "preview": ["preview_version"],
         "decisions": ["decision_status"],
     }
 
@@ -459,12 +479,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--code", metavar="PATH", help="source tree to check for instrumentation")
     p.add_argument("--probe", type=int, default=0, metavar="N", help="once running: evaluate N made-up identities to check assignment")
 
-    p = add("start", cmd_start, "Start an experiment if preflight passes.")
-    p.add_argument("experiment")
-    p.add_argument("--code", metavar="PATH")
-    p.add_argument("--force", action="store_true", help="start even though preflight failed")
+    p = add("start", cmd_start, "Start (or resume) an experiment if preflight passes.")
+    p.add_argument("experiment", help="experiment id, name or flag name")
+    p.add_argument("--code", metavar="PATH", help="source tree to check for instrumentation first (recommended; without it only Flagsmith is checked)")
+    p.add_argument("--force", action="store_true", help="for a person who has read the failed checks: start even though preflight failed")
 
-    p = add("pause", cmd_pause, "Pause a running experiment.")
+    p = add("preview", cmd_preview, "Let one test identity see a chosen version, to try it end to end before real users do.")
+    p.add_argument("experiment", help="experiment id, name or flag name")
+    p.add_argument("version", nargs="?", help="'control' or a variant key")
+    p.add_argument("--identity", default="", metavar="NAME", help="test identity to use; must start with 'referee-preview' (default: referee-preview)")
+    p.add_argument("--clear", action="store_true", help="remove the preview so the identity gets what everyone gets")
+
+    p = add("pause", cmd_pause, "Pause a running experiment and stop serving it.")
     p.add_argument("experiment")
 
     add("list", cmd_list, "List experiments in this environment.")
@@ -483,6 +509,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("experiment")
     p.add_argument("--by", default=os.environ.get("USER") or "cli", help="who is proposing")
     p.add_argument("--note", default="", help="a note for the approver")
+    p.add_argument("--void", action="store_true", help="when the call is 'investigate' and the data is spoiled: propose ending this run without a result and keeping control, so it can be run again cleanly")
+    p.add_argument("--reason", default="", help="with --void: why the run cannot be trusted")
     p.add_argument("--valid-hours", type=float, default=None, metavar="H", help="how long the proposal waits for approval (default 24, at most 168); the experiment keeps running meanwhile, and an expired proposal can simply be made again")
 
     add("decisions", cmd_decisions, "List rollout decisions.")
